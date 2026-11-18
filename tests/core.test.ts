@@ -7,7 +7,6 @@ import { randomUUID } from 'node:crypto';
 import { Store } from '../src/store.js';
 import { RemoteCore } from '../src/core.js';
 import { hash, type Command, type Session, type Device } from '../src/protocol.js';
-import { parseSettings } from '../src/settings.js';
 
 const session:Session={sessionId:'session-1',runtimeId:'runtime-1',bindingEpoch:1,branchId:'branch-1',title:'Project',cwd:'/tmp/project',mode:'attach',workState:'idle',capabilities:['prompt','steer','follow_up','abort'],messages:[]};
 function setup() {
@@ -86,12 +85,6 @@ test('restart changes dispatching to indeterminate and never automatically dispa
     store.saveCommand({...command,clientId:'test',hash:'hash',status:'dispatching',recordedAt:Date.now()});store.close();
     store=new Store(path);assert.equal(store.command(command.commandId)?.status,'indeterminate');assert.equal(store.command(command.commandId)?.error,'bridge_restarted');store.close();
   }finally{rmSync(directory,{recursive:true});}
-});
-test('model config accepts role and complexity routing and rejects command injection fields',()=>{
-  assert.equal(parseSettings({profiles:{planner:{thinkingLevel:'high'},complexity:{simple:{provider:'p',model:'m',thinkingLevel:'low'}}},maxConcurrency:2}).maxConcurrency,2);
-  assert.throws(()=>parseSettings({profiles:{worker:{model:'missing provider'}},maxConcurrency:2}),/model_requires_provider/);
-  assert.throws(()=>parseSettings({profiles:{worker:{executable:'curl'}},maxConcurrency:2}),/unknown_model_setting/);
-  assert.throws(()=>parseSettings({profiles:{},maxConcurrency:99}),/invalid_concurrency/);
 });
 test('failure between received journal and event is atomic and permits a known-unsent retry',async()=>{
   const f=setup();const append=f.store.append.bind(f.store);const c=f.command();

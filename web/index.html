@@ -62,8 +62,6 @@
     <nav class="drawer-nav">
       <button type="button" data-panel="background" data-owner>Background sessions</button>
       <button type="button" data-panel="devices">Devices</button>
-      <button type="button" data-panel="settings" data-owner>Models &amp; settings</button>
-      <button type="button" data-panel="workflows" data-owner>Orchestrator</button>
       <button type="button" id="install" hidden>Install app</button>
       <button type="button" id="logout" class="danger">Sign out</button>
     </nav>
@@ -88,28 +86,6 @@
       <div id="panel-devices" hidden>
         <p class="dim">Devices connected to this Pi. Revoke any device you don’t recognize. From the terminal: <code>/remote-control devices</code>.</p>
         <div id="device-list" class="card-list"></div>
-      </div>
-      <div id="panel-settings" hidden>
-        <h2>Models by role</h2>
-        <p class="dim">Model and effort profiles for orchestrator workers. Leave provider/model empty to use Pi’s configuration.</p>
-        <form id="config-form" class="stack">
-          <label class="sr-only" for="config-json">Configuration JSON</label>
-          <textarea id="config-json" class="code-input" rows="14" spellcheck="false"></textarea>
-          <button class="btn" type="submit">Save</button>
-        </form>
-        <h2>Available models</h2>
-        <button id="load-models" class="btn ghost" type="button">Load model catalog</button>
-        <input id="model-filter" class="input" placeholder="Search models…" hidden>
-        <div id="model-list" class="model-list"></div>
-      </div>
-      <div id="panel-workflows" hidden>
-        <p class="dim">Run several Pi workers in separate worktrees. Requires the daemon to be started with <code>--workspace</code>.</p>
-        <form id="workflow-form" class="stack">
-          <label class="sr-only" for="workflow-json">Workflow plan JSON</label>
-          <textarea id="workflow-json" class="code-input" rows="14" spellcheck="false"></textarea>
-          <button class="btn" type="submit">Validate &amp; run</button>
-        </form>
-        <div id="workflow-list" class="card-list"></div>
       </div>
     </div>
   </section>

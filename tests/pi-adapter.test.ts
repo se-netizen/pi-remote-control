@@ -7,75 +7,8 @@ import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { PiRpcWorker } from '../src/pi/rpc-worker.js';
 import { AttachBridge, installRemoteControl, remoteControlCompletions, type AttachContext, type AttachPi, type CompletionItem } from '../src/pi/attach-bridge.js';
 import { JsonLines, type BridgeCommand } from '../src/pi/types.js';
-
-async function fakeWorker() {
-  const dir = await mkdtemp(join(tmpdir(), 'pi-rpc-'));
-  const executable = join(dir, 'fake-pi');
-  await writeFile(executable, `#!${process.execPath}
-let buffer=''; let thinking='medium';
-const send = obj => process.stdout.write(JSON.stringify(obj)+'\\n');
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { buffer+=chunk; let end; while((end=buffer.indexOf('\\n'))>=0) {
- const c=JSON.parse(buffer.slice(0,end)); buffer=buffer.slice(end+1);
- const response = data => send({type:'response',id:c.id,success:true,data});
- if(c.type==='get_state') response({thinkingLevel:thinking,isStreaming:false});
- else if(c.type==='get_available_models') response({models:[{provider:'test',id:'reasoner'}]});
- else if(c.type==='get_available_thinking_levels') response({levels:['off','medium','high']});
- else if(c.type==='set_thinking_level') { thinking=c.level; response(); }
- else if(c.type==='echo') setTimeout(()=>response(c.value),c.delay||0);
- else if(c.type==='prompt') {
-  if(c.message==='handled') { response({disposition:'handled'}); continue; }
-  if(c.message==='timeout') { response({disposition:'started'}); continue; }
-  send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'a\\u2028b'}],stopReason:c.message==='error'?'error':'stop',usage:{input:2,output:3,totalTokens:5,cost:{total:0.25}}}});
-  send({type:'agent_end',messages:[]});
-  if(c.message==='delayed') { response({disposition:'started'}); setTimeout(()=>send({type:'agent_settled',aborted:false}),40); }
-  else { send({type:'agent_settled',aborted:false}); response({disposition:'started'}); }
- } else response();
-}});
-process.stdin.on('end',()=>process.exit(0));
-`);
-  await chmod(executable, 0o700);
-  const worker = new PiRpcWorker({ cwd: dir, executable, timeoutMs: 1000 });
-  await worker.start();
-  return { worker, cleanup: async () => { await worker.close(); await rm(dir, { recursive: true, force: true }); } };
-}
-
-test('RPC correlates out-of-order responses, validates actual model thinking levels', async () => {
-  const { worker, cleanup } = await fakeWorker();
-  try {
-    const [a, b] = await Promise.all([worker.request('echo', { value: 'slow', delay: 25 }), worker.request('echo', { value: 'fast' })]);
-    assert.equal(a, 'slow'); assert.equal(b, 'fast');
-    assert.deepEqual(await worker.getAvailableModels(), [{ provider: 'test', id: 'reasoner' }]);
-    await assert.rejects(worker.setThinkingLevel('max'), /unsupported/);
-    await worker.setThinkingLevel('high');
-    assert.equal((await worker.request('get_state')).thinkingLevel, 'high');
-  } finally { await cleanup(); }
-});
-
-test('RPC prompt handles settle-before-response, Unicode separators, usage and handled commands', async () => {
-  const { worker, cleanup } = await fakeWorker();
-  try {
-    const result = await worker.prompt('hello');
-    assert.equal(result.output, 'a\u2028b'); assert.equal(result.usage.totalTokens, 5); assert.equal(result.usage.cost, 0.25);
-    assert.equal((await worker.prompt('handled')).output, '');
-    const started = Date.now(); await worker.prompt('delayed'); assert.ok(Date.now() - started >= 30);
-    await assert.rejects(worker.prompt('error'), /failed run/);
-  } finally { await cleanup(); }
-});
-
-test('RPC cancellation and timeout are explicit; commands are not silently retried', async () => {
-  const { worker, cleanup } = await fakeWorker();
-  try {
-    await assert.rejects(worker.prompt('timeout', { timeoutMs: 25 }), /timed out/);
-    const controller = new AbortController();
-    const run = worker.prompt('timeout', { signal: controller.signal });
-    controller.abort();
-    await assert.rejects(run, /cancelled/);
-  } finally { await cleanup(); }
-});
 
 test('JSONL framing is LF-only and rejects oversize or non-object frames', () => {
   const records: unknown[] = [];
@@ -234,20 +167,6 @@ test('TUI startup advertises the command without exposing a session; /remote-con
   } finally {
     bridge.stop(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true });
   }
-});
-
-test('real installed Pi starts an isolated RPC process and reports supported levels without inference', {
-  skip: process.env.PI_REMOTE_REAL_SMOKE !== '1',
-}, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'pi-real-smoke-'));
-  const worker = new PiRpcWorker({ cwd: dir, timeoutMs: 15_000, env: { PI_OFFLINE: '1' } });
-  try {
-    await worker.start();
-    const state = await worker.request('get_state');
-    assert.equal(state.isStreaming, false); assert.equal(typeof state.sessionId, 'string');
-    const levels = await worker.getAvailableThinkingLevels(); assert.ok(levels.includes('off'));
-    const models = await worker.getAvailableModels(); assert.ok(Array.isArray(models));
-  } finally { await worker.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('real Pi discovers installed package commands without an explicit extension flag', {

@@ -1,4 +1,4 @@
-import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, workflowPlanExample, matchCommands, splitAttachments, formatBytes, fileBadge, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } from './helpers.js';
+import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, matchCommands, splitAttachments, formatBytes, fileBadge, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } from './helpers.js';
 import { SEAL_CONTENT_TYPE, sealRequest, openResponse, sealStream, openEvent } from './seal.js';
 
 const $ = id => document.getElementById(id);
@@ -80,7 +80,7 @@ const ERRORS = {
   unauthenticated: 'This device isn’t paired. Run /remote-control pair in the Pi terminal, then scan the QR.', device_revoked: 'Access for this device was revoked. Run /remote-control pair in the Pi terminal to pair it again.',
   session_offline: 'The Pi session is offline.', session_busy: 'Pi is busy. Try again in a moment.', queue_full: 'Too many messages are waiting. Wait a moment, then try again.',
   rate_limited: 'Too many requests. Try again in a moment.', prompt_too_large: 'Message is too long (max 64 KiB). Shorten it or attach it as a file.',
-  slash_commands_disabled: 'Slash commands are sent as commands, not messages.', invalid_command: 'Invalid command format.', workspace_not_approved: 'The daemon wasn’t started with --workspace. Restart it with --workspace to run workflows.',
+  slash_commands_disabled: 'Slash commands are sent as commands, not messages.', invalid_command: 'Invalid command format.',
   forbidden: 'This device doesn’t have permission to do that.',
   folder_outside_home: 'The folder must be inside your home directory.', folder_not_found: 'Folder not found. Check the path.', invalid_folder: 'Enter the path of a project folder.', background_start_failed: 'Couldn’t start the background session.', background_not_found: 'Background session not found.',
   tailscale_blocked: 'Access for this device was revoked, so it can’t sign in automatically. Run /remote-control pair in the Pi terminal, then scan the QR.',
@@ -846,12 +846,12 @@ function renderPicker() {
 function openDrawer() { $('drawer').hidden = false; $('scrim').hidden = false; void refreshSessions(false).catch(() => {}); }
 function closeDrawer() { $('drawer').hidden = true; $('scrim').hidden = true; }
 
-const PANELS = { background: 'Background sessions', devices: 'Devices', settings: 'Models & settings', workflows: 'Orchestrator' };
+const PANELS = { background: 'Background sessions', devices: 'Devices' };
 function openPanel(name) {
   closeDrawer();
   $('panel').hidden = false; $('panel-title').textContent = PANELS[name];
   for (const key of Object.keys(PANELS)) $(`panel-${key}`).hidden = key !== name;
-  const load = { background: loadBackground, devices: loadDevices, settings: loadConfig, workflows: loadWorkflows }[name];
+  const load = { background: loadBackground, devices: loadDevices }[name];
   void load().catch(error => toast(error.message, 'error'));
 }
 
@@ -906,46 +906,6 @@ async function loadBackground() {
     });
     actions.append(stopButton);
     card.append(info, actions); list.append(card);
-  }
-}
-
-async function loadConfig() { $('config-json').value = JSON.stringify(await api('/api/config'), null, 2); }
-let models = [];
-async function loadModels() {
-  $('load-models').disabled = true;
-  try {
-    models = ((await api('/api/models')).models ?? []).sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
-    $('model-filter').hidden = false; renderModels();
-  } catch (error) { toast(error.message, 'error'); } finally { $('load-models').disabled = false; }
-}
-function renderModels() {
-  const query = $('model-filter').value.trim().toLowerCase();
-  const shown = models.filter(m => `${m.provider}/${m.id} ${m.name ?? ''}`.toLowerCase().includes(query)).slice(0, 200);
-  $('model-list').replaceChildren(...(shown.length ? shown.map(m => el('div', '', `${m.provider}/${m.id}${m.reasoning ? ' · reasoning' : ''}`)) : [el('p', 'dim', 'No models found.')]));
-}
-
-async function loadWorkflows() {
-  if (!$('workflow-json').value) $('workflow-json').value = JSON.stringify(workflowPlanExample(), null, 2);
-  const data = await api('/api/workflows');
-  const list = $('workflow-list'); list.replaceChildren();
-  if (!data.workflows?.length) { list.append(el('p', 'dim', 'No workflows yet.')); return; }
-  for (const raw of [...data.workflows].reverse()) {
-    const workflow = raw.snapshot ?? raw;
-    const card = el('div', 'card'); const info = el('div', 'grow');
-    info.append(el('strong', '', `${workflow.goal ?? workflow.plan?.goal ?? workflow.workflowId} · ${workflow.status}`));
-    const tasks = (workflow.tasks ?? []).map(entry => `${entry.status === 'succeeded' ? '✓' : entry.status === 'failed' ? '✗' : entry.status === 'running' ? '●' : '·'} ${(entry.task ?? entry).taskId} — ${entry.status ?? 'proposed'}`);
-    info.append(el('pre', '', tasks.join('\n')));
-    card.append(info);
-    if (['proposed', 'running', 'waiting_input', 'reviewing'].includes(workflow.status)) {
-      const cancel = el('button', 'btn ghost small danger', 'Cancel'); cancel.type = 'button';
-      cancel.addEventListener('click', async () => {
-        cancel.disabled = true;
-        try { await api(`/api/workflows/${encodeURIComponent(workflow.workflowId)}/cancel`, { method: 'POST', body: {} }); await loadWorkflows(); }
-        catch (error) { cancel.disabled = false; toast(error.message, 'error'); }
-      });
-      card.append(cancel);
-    }
-    list.append(card);
   }
 }
 
@@ -1013,18 +973,6 @@ function initialize() {
       await loadBackground();
       setTimeout(() => void refreshSessions(false).then(() => { const live = state.sessions.find(x => x.background?.name === entry.name); if (live) { $('panel').hidden = true; selectSession(live.sessionId); } }).catch(() => {}), 4000);
     } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
-  });
-  $('load-models').addEventListener('click', () => void loadModels());
-  $('model-filter').addEventListener('input', renderModels);
-  $('config-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try { await api('/api/config', { method: 'PUT', body: JSON.parse($('config-json').value) }); toast('Settings saved.'); }
-    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
-  });
-  $('workflow-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try { await api('/api/workflows', { method: 'POST', body: JSON.parse($('workflow-json').value) }); toast('Workflow scheduled.'); await loadWorkflows(); }
-    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
   });
   state.tickTimer = setInterval(updateWorking, 1000);
   document.addEventListener('visibilitychange', () => {

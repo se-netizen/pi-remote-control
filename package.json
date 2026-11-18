@@ -42,6 +42,7 @@
     "pi:install": "pi install .",
     "pi:uninstall": "pi remove .",
     "dev": "tsx watch src/cli.ts start",
+    "prebuild": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",

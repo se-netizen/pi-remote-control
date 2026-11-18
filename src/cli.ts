@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { mkdir, lstat, chmod, readFile, writeFile, unlink, realpath } from 'node:fs/promises';
+import { mkdir, lstat, chmod, readFile, writeFile, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { execFile } from 'node:child_process';
@@ -10,8 +10,8 @@ import { tailscaleAuth } from './tailscale.js';
 import { assert } from './errors.js';
 
 const {values,positionals}=parseArgs({allowPositionals:true,options:{
-  'data-dir':{type:'string'},port:{type:'string'},host:{type:'string'},origin:{type:'string',multiple:true},'allow-http':{type:'boolean'},workspace:{type:'string'},tools:{type:'string'},
-  network:{type:'boolean'},'allow-checks':{type:'boolean'},owner:{type:'boolean'},viewer:{type:'boolean'},'no-tailscale-login':{type:'boolean'},session:{type:'string',multiple:true},help:{type:'boolean'},
+  'data-dir':{type:'string'},port:{type:'string'},host:{type:'string'},origin:{type:'string',multiple:true},'allow-http':{type:'boolean'},
+  owner:{type:'boolean'},viewer:{type:'boolean'},'no-tailscale-login':{type:'boolean'},session:{type:'string',multiple:true},help:{type:'boolean'},
 }});
 const action=positionals[0]??'start';
 /** How to run this CLI again: the installed command, or npm start from a source checkout. */
@@ -23,7 +23,6 @@ if(values.help||action==='help') {
 Daemon
   ${CMD} start [--host 127.0.0.1] [--port 3141] [--allow-http] [--origin URL]...
 ${PAD}[--no-tailscale-login] [--data-dir PATH]
-${PAD}[--workspace /git/repo] [--tools read,grep,find,ls,edit,write,bash] [--network] [--allow-checks]
   ${CMD} status                      daemon, addresses, sessions, devices
 
 Devices
@@ -41,8 +40,6 @@ Start options
   --origin URL                  allow another exact origin (repeatable or comma-separated)
   --no-tailscale-login          turn off automatic sign-in for devices on the same Tailscale account
   --data-dir PATH               data location (default ~/.pi/remote-control, or PI_REMOTE_DATA_DIR)
-  --workspace PATH              enable the workflow orchestrator on this Git repo
-  --tools LIST / --network / --allow-checks   workflow worker tool policy (not an OS sandbox)
 
 In Pi: ${CMD==='npm start --'?'npm run pi:install':'pi install npm:@se-netizen/pi-remote-control'}, then type /remote-control. Docs: https://github.com/se-netizen/pi-remote-control#readme`);
 } else await main();
@@ -92,8 +89,6 @@ async function main() {
       const dbPath=join(dataDir,'bridge.sqlite');
       try{const st=await lstat(dbPath);assert(st.isFile()&&!st.isSymbolicLink()&&(!process.getuid||st.uid===process.getuid()),'unsafe_database');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
       const port=Number(values.port??3141);assert(Number.isInteger(port)&&port>0&&port<=65535,'invalid_port');
-      const tools=(values.tools??'read,grep,find,ls').split(',');assert(tools.every(t=>['read','grep','find','ls','edit','write','bash'].includes(t)),'invalid_tools');
-      const workspace=values.workspace?await realpath(values.workspace):undefined;
       const origin=(values.origin??[]).flatMap(v=>v.split(',')).map(v=>v.trim()).filter(Boolean);
       const hostnames=['0.0.0.0','::'].includes(values.host??'')&&values['allow-http']?await tailscaleNames():[];
       const tailscale=values['no-tailscale-login']?undefined:tailscaleAuth();
@@ -102,10 +97,9 @@ async function main() {
       process.removeAllListeners('warning');
       process.on('warning',w=>{if(!(w.name==='ExperimentalWarning'&&/SQLite/i.test(w.message)))console.warn(`${w.name}: ${w.message}`);});
       const { startServer } = await import('./server.js');
-      const app=await startServer({dataDir,secret,port,host:values.host,origin,hostnames,allowHttp:values['allow-http'],tailscale:tailscaleOwner?tailscale:undefined,workspace,tools,network:values.network,allowChecks:values['allow-checks']});
+      const app=await startServer({dataDir,secret,port,host:values.host,origin,hostnames,allowHttp:values['allow-http'],tailscale:tailscaleOwner?tailscale:undefined});
       console.log(`Pi Remote Control:\n${app.urls.map(u=>`  ${u}`).join('\n')}\nListen: ${app.bindHost}:${port}\nIPC: ${app.socketPath}\nTurn on /remote-control in Pi, then run ${CMD} pair.`);
       console.log(tailscaleOwner?'Tailscale sign-in: on. Devices on the same Tailscale account as this machine sign in without a QR (turn off: --no-tailscale-login).':'Tailscale sign-in: off (Tailscale is not running, or --no-tailscale-login).');
-      if(workspace)console.log(`Workspace orchestrator: ${workspace}; tools: ${tools.join(',')}; concurrency default: 2`);
       let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;await app.close();await unlink(lockPath).catch(()=>{});};
       process.once('SIGINT',()=>void stop());process.once('SIGTERM',()=>void stop());
     }catch(error){await unlink(lockPath).catch(()=>{});throw error;}
