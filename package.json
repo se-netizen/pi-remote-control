@@ -1,0 +1,34 @@
+{
+  "name": "pi-remote-control-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private remote control and deterministic workflow orchestration for Pi",
+  "pi": {
+    "extensions": [
+      "./extensions/remote-control.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "pi:install": "pi install .",
+    "pi:uninstall": "pi remove .",
+    "dev": "tsx watch src/cli.ts start",
+    "build": "tsc && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "qrcode-generator": "2.0.4"
+  }
+}

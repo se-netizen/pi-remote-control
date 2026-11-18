@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+.pi-remote/
+*.sqlite*
+*.sock
+.claude/
+docs/

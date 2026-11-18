@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#1a1915">
+  <meta name="description" content="Lanjutkan sesi Pi di komputer Anda dari HP atau browser.">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <title>Pi Remote</title>
+</head>
+<body>
+  <section id="pair-screen" class="pair-screen" hidden>
+    <div class="pair-card">
+      <div class="logo" aria-hidden="true">π</div>
+      <h1>Pi Remote</h1>
+      <p id="pair-message">Jalankan <code>/remote-control</code> di terminal Pi, lalu scan QR-nya dengan kamera HP.</p>
+      <a id="pair-tailscale" class="btn wide-link" hidden>Buka lewat Tailscale (masuk otomatis)</a>
+      <div id="pair-busy" class="pair-busy" hidden><span class="spark spinning" aria-hidden="true">✻</span> Menghubungkan…</div>
+      <form id="pair-form" class="pair-form">
+        <label class="sr-only" for="pair-link">Tautan dari terminal</label>
+        <input id="pair-link" autocomplete="off" spellcheck="false" placeholder="…atau tempel tautan dari terminal">
+        <button class="btn" type="submit">Hubungkan</button>
+      </form>
+    </div>
+  </section>
+
+  <section id="chat-screen" class="chat" hidden>
+    <header class="bar">
+      <button id="menu-button" class="icon-btn" type="button" aria-label="Buka menu">☰</button>
+      <div class="bar-title"><strong id="title">Pi</strong><small id="subtitle"></small></div>
+      <span id="status" class="status" role="status"><span class="dot"></span><span id="status-text">Menyambung</span></span>
+    </header>
+    <div id="banner" class="banner" hidden></div>
+    <main id="transcript" class="transcript">
+      <div id="messages" class="messages" aria-label="Percakapan"></div>
+    </main>
+    <button id="jump" class="jump" type="button" aria-label="Ke pesan terbaru" hidden>↓</button>
+    <footer class="composer-wrap">
+      <div id="working" class="working" hidden><span class="spark spinning" aria-hidden="true">✻</span><span id="working-text">Bekerja…</span><span id="working-time" class="dim"></span></div>
+      <div id="pending" class="pending" aria-live="polite"></div>
+      <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Perintah" hidden></div>
+      <form id="composer" class="composer">
+        <span class="prompt-mark" aria-hidden="true">›</span>
+        <label class="sr-only" for="input">Pesan untuk Pi</label>
+        <textarea id="input" rows="1" aria-controls="slash-menu" aria-autocomplete="list" placeholder="Ketik pesan atau /perintah…" enterkeyhint="send" autocomplete="off"></textarea>
+        <button id="stop" class="stop-btn" type="button" aria-label="Hentikan Pi" hidden>■</button>
+        <button id="send" class="send-btn" type="submit" aria-label="Kirim">↑</button>
+      </form>
+      <div class="composer-hint"><span id="mode-hint" class="dim"></span><button id="mode-toggle" class="chip" type="button" hidden></button></div>
+    </footer>
+  </section>
+
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" aria-label="Menu" hidden>
+    <div class="drawer-head"><span class="logo small" aria-hidden="true">π</span><strong>Pi Remote</strong><button id="drawer-close" class="icon-btn" type="button" aria-label="Tutup menu">✕</button></div>
+    <div class="drawer-label">Sesi</div>
+    <div id="sessions" class="session-list"></div>
+    <nav class="drawer-nav">
+      <button type="button" data-panel="background" data-owner>Sesi background</button>
+      <button type="button" data-panel="devices">Perangkat</button>
+      <button type="button" data-panel="settings" data-owner>Model &amp; pengaturan</button>
+      <button type="button" data-panel="workflows" data-owner>Orchestrator</button>
+      <button type="button" id="install" hidden>Pasang aplikasi</button>
+      <button type="button" id="logout" class="danger">Keluar dari perangkat ini</button>
+    </nav>
+    <div id="host-info" class="drawer-foot dim"></div>
+  </aside>
+
+  <section id="panel" class="panel" hidden>
+    <header class="bar"><button id="panel-back" class="icon-btn" type="button" aria-label="Kembali">←</button><div class="bar-title"><strong id="panel-title"></strong></div></header>
+    <div class="panel-body">
+      <div id="panel-background" hidden>
+        <p class="dim">Pi tetap berjalan di komputer walau terminal ditutup, dan bisa dikendalikan dari sini. Kembali ke terminal dengan <code>/remote-control attach</code>.</p>
+        <p id="background-backend" class="dim"></p>
+        <form id="background-form" class="stack">
+          <label for="background-folder">Folder proyek</label>
+          <input id="background-folder" class="input" list="background-folders" autocomplete="off" spellcheck="false" placeholder="~/apps/proyek">
+          <datalist id="background-folders"></datalist>
+          <button class="btn" type="submit">Mulai sesi baru</button>
+        </form>
+        <h2>Sedang berjalan</h2>
+        <div id="background-list" class="card-list"></div>
+      </div>
+      <div id="panel-devices" hidden>
+        <p class="dim">Perangkat yang terhubung ke Pi ini. Cabut akses perangkat yang tidak Anda kenal. Dari terminal: <code>/remote-control devices</code>.</p>
+        <div id="device-list" class="card-list"></div>
+      </div>
+      <div id="panel-settings" hidden>
+        <h2>Model per peran</h2>
+        <p class="dim">Profil model dan effort untuk worker orchestrator. Kosongkan provider/model untuk mengikuti konfigurasi Pi.</p>
+        <form id="config-form" class="stack">
+          <label class="sr-only" for="config-json">Konfigurasi JSON</label>
+          <textarea id="config-json" class="code-input" rows="14" spellcheck="false"></textarea>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
+        <h2>Model tersedia</h2>
+        <button id="load-models" class="btn ghost" type="button">Muat katalog model</button>
+        <input id="model-filter" class="input" placeholder="Cari model…" hidden>
+        <div id="model-list" class="model-list"></div>
+      </div>
+      <div id="panel-workflows" hidden>
+        <p class="dim">Jalankan beberapa worker Pi pada worktree terpisah. Butuh daemon yang dijalankan dengan <code>--workspace</code>.</p>
+        <form id="workflow-form" class="stack">
+          <label class="sr-only" for="workflow-json">Rencana workflow JSON</label>
+          <textarea id="workflow-json" class="code-input" rows="14" spellcheck="false"></textarea>
+          <button class="btn" type="submit">Validasi &amp; jalankan</button>
+        </form>
+        <div id="workflow-list" class="card-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <div id="picker-scrim" class="scrim" hidden></div>
+  <section id="picker" class="picker" role="dialog" aria-labelledby="picker-title" hidden>
+    <div class="picker-head"><strong id="picker-title"></strong><button id="picker-close" class="icon-btn" type="button" aria-label="Tutup">✕</button></div>
+    <input id="picker-filter" class="input" placeholder="Cari…" autocomplete="off" hidden>
+    <div id="picker-list" class="picker-list"></div>
+  </section>
+
+  <div id="toast" class="toast" role="alert" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
