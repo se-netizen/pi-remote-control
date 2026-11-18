@@ -78,7 +78,7 @@ test('without tmux (or on Windows) Pi runs in RPC mode; its dialogs are cancelle
   assert.equal(entry.backend, 'rpc'); assert.equal(entry.pid, 4242);
   assert.deepEqual(spawned!.args.slice(-2), ['--mode', 'rpc']);
   assert.equal(spawned!.env.PI_REMOTE_BACKGROUND_BACKEND, 'rpc');
-  child.stdout.write(JSON.stringify({ type: 'extension_ui_request', id: 'q1', method: 'confirm', title: 'Hapus?' }) + '\n');
+  child.stdout.write(JSON.stringify({ type: 'extension_ui_request', id: 'q1', method: 'confirm', title: 'Delete?' }) + '\n');
   child.stdout.write(JSON.stringify({ type: 'extension_ui_request', id: 'n1', method: 'notify', message: 'hi' }) + '\n');
   await new Promise(r => setTimeout(r, 20));
   assert.deepEqual(answers.map(a => JSON.parse(a)), [{ type: 'extension_ui_response', id: 'q1', cancelled: true }]);

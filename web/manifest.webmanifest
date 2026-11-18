@@ -1,13 +1,13 @@
 {
   "name": "Pi Remote Control",
   "short_name": "Pi Remote",
-  "description": "Kendalikan sesi Pi dan pantau workflow pada host pribadi Anda.",
+  "description": "Control Pi sessions and monitor workflows on your own computer.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#f5f7f6",
   "theme_color": "#111b21",
-  "lang": "id",
+  "lang": "en",
   "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
 }

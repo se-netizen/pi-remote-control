@@ -132,6 +132,7 @@ test('a new session in the same Pi runtime (/new, /resume, /fork) keeps paired d
     const viewer:Device={clientId:'viewer',name:'Tablet',grants:[{sessionId:session.sessionId,control:false}],owner:false,revoked:false,createdAt:10_000,expiresAt:10_000+3600_000};
     const revoked:Device={clientId:'gone',name:'Old',grants:[{sessionId:session.sessionId,control:true}],owner:false,revoked:true,createdAt:10_000,expiresAt:10_000+3600_000};
     f.store.saveDevice(viewer,hash('viewer'));f.store.saveDevice(revoked,hash('gone'));
+    f.core.sessions.get(session.sessionId)!.session.messages.push({role:'user',content:'hello',timestamp:1});
     f.core.disconnect(f.owner); // session_shutdown(reason new) closes the old socket first
     const owner2={};
     const next=f.core.register({...session,sessionId:'session-2',bindingEpoch:2,branchId:'branch-2'},async()=>({status:'dispatched_unconfirmed'}),owner2);
@@ -147,6 +148,30 @@ test('a new session in the same Pi runtime (/new, /resume, /fork) keeps paired d
     const other=f.core.register({...session,sessionId:'session-3',runtimeId:'runtime-2'},async()=>({status:'dispatched_unconfirmed'}),{});
     assert.equal(other.followedDevices,undefined);
     assert.equal(f.core.list(devices.get('viewer')!).some(s=>s.sessionId==='session-3'),false);
+  }finally{f.store.close();}
+});
+test('attach: a session moving to a terminal Pi stays listed as moving, and the empty session that Pi opened first disappears',()=>{
+  const f=setup();try{
+    const owner=f.store.devices()[0]!;
+    // The session lives in a background Pi (runtime-bg) and has a conversation.
+    f.core.disconnect(f.owner);
+    const bg={};f.core.register({...session,runtimeId:'runtime-bg',messages:[{role:'user',content:[{type:'text',text:'fix the login bug\n\nFiles from phone (saved on this computer):\n- /x/a.png (image/png, 1 KB)'}],timestamp:1}]},async()=>({status:'dispatched_unconfirmed'}),bg);
+    // A fresh terminal Pi opened an empty session before running /remote-control attach.
+    const term={};f.core.register({...session,sessionId:'empty-here',runtimeId:'runtime-term',messages:[]},async()=>({status:'dispatched_unconfirmed'}),term);
+    f.core.markMoving(session.sessionId,60_000);
+    // The Pi that is leaving may still report its state once before it exits; that does not end the move.
+    f.core.register({...session,runtimeId:'runtime-bg',messages:[{role:'user',content:'fix the login bug',timestamp:1}]},async()=>({status:'dispatched_unconfirmed'}),bg);
+    f.core.disconnect(bg);
+    const listed=(f.core.summaries(owner) as any[]).find(s=>s.sessionId===session.sessionId);
+    assert.equal(listed.connection,'offline');assert.equal(listed.moving,true,'phones keep the session instead of jumping');
+    assert.equal(listed.preview,'fix the login bug','previews skip the attached file list');
+    assert.equal((f.core.snapshot(owner,session.sessionId) as any).session.moving,true);
+    // switchSession: the terminal Pi's empty session closes and the moved session registers there.
+    f.core.disconnect(term);
+    f.core.register({...session,runtimeId:'runtime-term',messages:[{role:'user',content:'fix the login bug',timestamp:1}]},async()=>({status:'dispatched_unconfirmed'}),{});
+    const after=f.core.summaries(owner) as any[];
+    assert.deepEqual(after.map(s=>s.sessionId),[session.sessionId],'the empty session is gone, not left as ended');
+    assert.equal(after[0].connection,'online');assert.equal(after[0].moving,undefined);
   }finally{f.store.close();}
 });
 test('slash text is accepted only as an explicit command, and its output is returned but never journaled',async()=>{

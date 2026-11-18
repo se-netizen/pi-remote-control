@@ -1,16 +1,16 @@
 export const COMMAND_LABELS = {
-  received: 'Diterima bridge', dispatching: 'Sedang diteruskan',
-  dispatched_unconfirmed: 'Diteruskan · belum terkonfirmasi',
-  pi_acknowledged: 'Diterima Pi', accepted: 'Diterima Pi', observed: 'Teramati di Pi',
-  completed: 'Selesai teramati', rejected: 'Ditolak sebelum dispatch',
-  stale_context: 'Konteks telah berubah', failed: 'Gagal',
-  indeterminate: 'Belum dapat dipastikan', cancelled: 'Dibatalkan',
+  received: 'Received by bridge', dispatching: 'Forwarding',
+  dispatched_unconfirmed: 'Forwarded · unconfirmed',
+  pi_acknowledged: 'Received by Pi', accepted: 'Received by Pi', observed: 'Seen in Pi',
+  completed: 'Completed', rejected: 'Rejected before dispatch',
+  stale_context: 'Context changed', failed: 'Failed',
+  indeterminate: 'Not confirmed yet', cancelled: 'Cancelled',
 };
 
 export const WORK_LABELS = {
-  idle: 'Siap menerima instruksi', running: 'Pi sedang bekerja',
-  waiting_local_input: 'Menunggu jawaban di terminal', waiting_remote_approval: 'Menunggu keputusan',
-  stopping: 'Penghentian diminta', ended: 'Proses sesi berakhir',
+  idle: 'Ready for instructions', running: 'Pi is working',
+  waiting_local_input: 'Waiting for an answer in the terminal', waiting_remote_approval: 'Waiting for a decision',
+  stopping: 'Stop requested', ended: 'Session process ended',
 };
 
 export function contextKey(session) {
@@ -44,7 +44,7 @@ export function messageParts(message) {
     if (part.type === 'text') return [{ type: 'text', text: String(part.text ?? '') }];
     if (part.type === 'thinking') return [{ type: 'detail', label: 'Reasoning', text: String(part.thinking ?? part.text ?? '') }];
     if (part.type === 'toolCall') return [{ type: 'detail', label: `Tool · ${part.name ?? 'tool'}`, text: JSON.stringify(part.arguments ?? {}, null, 2) }];
-    if (part.type === 'image') return [{ type: 'detail', label: 'Lampiran gambar', text: 'Pratinjau lampiran belum tersedia.' }];
+    if (part.type === 'image') return [{ type: 'detail', label: 'Image attachment', text: 'Attachment preview isn’t available yet.' }];
     return [];
   });
 }
@@ -69,12 +69,12 @@ export function hasCapability(session, kind) {
 export function workflowPlanExample() {
   return {
     plan: {
-      goal: 'Perbarui dokumentasi proyek',
+      goal: 'Update the project documentation',
       maxConcurrency: 2,
       tasks: [{
-        taskId: 'docs', goal: 'Perbarui README berdasarkan implementasi',
+        taskId: 'docs', goal: 'Update the README to match the implementation',
         role: 'worker', complexity: 'simple', scope: ['README.md'],
-        acceptanceCriteria: ['README memuat petunjuk instalasi yang dapat dijalankan'],
+        acceptanceCriteria: ['README includes installation steps that work as written'],
         expectedArtifacts: ['README.md'], tools: ['read', 'edit', 'write'],
       }],
     },
@@ -182,7 +182,7 @@ export function resultText(message) {
   const content = message?.content;
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
-  return content.map(part => part?.type === 'text' ? String(part.text ?? '') : part?.type === 'image' ? '[gambar]' : '').filter(Boolean).join('\n');
+  return content.map(part => part?.type === 'text' ? String(part.text ?? '') : part?.type === 'image' ? '[image]' : '').filter(Boolean).join('\n');
 }
 
 /**
@@ -212,4 +212,47 @@ export function matchCommands(commands, query) {
     return 9;
   };
   return list.map((c, i) => ({ c, r: rank(c), i })).filter(x => x.r < 9).sort((a, b) => a.r - b.r || a.i - b.i).map(x => x.c);
+}
+
+/* ---------- attachments ---------- */
+export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+export const UPLOAD_MAX_FILES = 10;
+/** Must match ATTACHMENT_HEADING in src/pi/attach-bridge.ts (a test checks both). */
+export const ATTACHMENT_HEADING = 'Files from phone (saved on this computer):';
+/** Heading used before the English UI; existing transcripts still contain it. */
+export const LEGACY_ATTACHMENT_HEADING = 'Lampiran dari HP (tersimpan di komputer ini):';
+
+export function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Splits a user message sent with files into what was typed and the file list the bridge appended.
+ * Lines Pi adds after it (image resize notes, "[image]" placeholders) are dropped from view.
+ * Accepts the current and the legacy heading, whichever occurs last.
+ */
+export function splitAttachments(text) {
+  const value = String(text ?? '');
+  const [at, heading] = [ATTACHMENT_HEADING, LEGACY_ATTACHMENT_HEADING]
+    .map(h => [value.lastIndexOf(h), h]).reduce((best, next) => next[0] > best[0] ? next : best);
+  if (at < 0) return { text: value, files: [] };
+  const lines = value.slice(at + heading.length).split('\n').filter(line => line.trim());
+  const files = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const m = /^- (\/.+) \(([^(),]+), ([\d.]+ [KM]?B)\)$/.exec(lines[i]);
+    if (!m) break;
+    files.push({ path: m[1], name: m[1].slice(m[1].lastIndexOf('/') + 1), type: m[2], size: m[3] });
+  }
+  const rest = lines.slice(i);
+  if (!files.length || rest.some(line => !line.trimStart().startsWith('['))) return { text: value, files: [] };
+  return { text: value.slice(0, at).trimEnd(), files };
+}
+
+/** Short label for a file without a preview, e.g. "PDF" or "CSV". */
+export function fileBadge(name) {
+  const dot = String(name ?? '').lastIndexOf('.');
+  const ext = dot > 0 ? String(name).slice(dot + 1) : '';
+  return /^[A-Za-z0-9]{1,4}$/.test(ext) ? ext.toUpperCase() : 'FILE';
 }

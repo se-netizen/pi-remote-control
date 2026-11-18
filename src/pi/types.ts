@@ -27,8 +27,10 @@ export interface BridgeCommand {
   bindingEpoch: number;
   branchId: string;
   kind: 'prompt' | 'steer' | 'follow_up' | 'abort' | 'command';
-  payload: { text?: string };
+  payload: { text?: string; attachments?: RemoteAttachment[] };
 }
+/** A file uploaded from a phone, already on this machine's disk (see src/uploads.ts). */
+export interface RemoteAttachment { name: string; path: string; mimeType: string; size: number }
 
 export interface BridgeResult {
   type: 'result';

@@ -5,5 +5,4 @@ coverage/
 .pi-remote/
 *.sqlite*
 *.sock
-.claude/
 docs/

@@ -19,6 +19,19 @@ export const DEVICE_TTL_MS=30*24*3_600_000;
 
 const STREAMING_EVENTS=new Set(['message_update','tool_execution_update']);
 /** Session summary for the event log: identity and state, never the transcript. */
+/** The last thing the user asked in a session, so sessions in the same folder can be told apart. */
+export function sessionPreview(messages: unknown[]): string|undefined {
+  for(let i=messages.length-1;i>=0;i--) {
+    const m=messages[i] as {role?:string;content?:unknown};
+    if(m?.role!=='user')continue;
+    const c=m.content;
+    let text=typeof c==='string'?c:Array.isArray(c)?c.filter(p=>(p as {type?:string})?.type==='text').map(p=>String((p as {text?:unknown}).text??'')).join(' '):'';
+    // Drop the file list a message with attachments carries (see attachmentText in the bridge).
+    text=text.replace(/\n*(Files from phone|Lampiran dari HP) \([^)]*\):\n[\s\S]*$/,'').replace(/\s+/g,' ').trim();
+    if(text)return text.length>80?text.slice(0,79)+'…':text;
+  }
+  return undefined;
+}
 function summary(s: Session): Record<string,unknown> {
   return {sessionId:s.sessionId,runtimeId:s.runtimeId,bindingEpoch:s.bindingEpoch,branchId:s.branchId,leafEntryId:s.leafEntryId,title:s.title,mode:s.mode,workState:s.workState,connection:s.connection,messageCount:s.messages.length};
 }
@@ -46,6 +59,21 @@ export class RemoteCore extends EventEmitter {
   private inflight = new Set<Promise<CommandRecord>>();
   private digests = new Map<string,string>();
   constructor(readonly store: Store,private clock = { wall:()=>Date.now(),mono:()=>performance.now() }) { super(); }
+  /** Sessions handed between a terminal Pi and a background Pi: briefly offline, expected back soon. */
+  private moving=new Map<string,{until:number;from:string}>();
+  markMoving(sessionId: string,ms=60_000): void {
+    const b=this.sessions.get(sessionId);if(!b)return;
+    this.moving.set(sessionId,{until:this.clock.wall()+ms,from:b.session.runtimeId});
+    this.event('session.state',{...summary(b.session),moving:true},sessionId);
+  }
+  isMoving(sessionId: string): boolean {
+    const m=this.moving.get(sessionId);
+    if(m===undefined)return false;
+    if(m.until>this.clock.wall())return true;
+    this.moving.delete(sessionId);return false;
+  }
+  /** Turns upload ids of a message into files on disk (set by the server; see src/uploads.ts). */
+  resolveAttachments?: (device: Device, ids: string[]) => unknown[];
   event(type: string,payload: unknown,sessionId?: string): void {
     const event = this.store.append(type,payload,sessionId); this.emit('event',event);
   }
@@ -62,7 +90,11 @@ export class RemoteCore extends EventEmitter {
     assert(!old || old.owner === owner || old.session.connection === 'offline', 'session_already_attached',409);
     if(old && old.owner === owner && old.session.runtimeId === session.runtimeId) assert(session.bindingEpoch >= old.session.bindingEpoch,'stale_binding',409);
     const changed = old && ['runtimeId','bindingEpoch','branchId'].some(k=>old.session[k as keyof Session]!==session[k as keyof Session]);
-    const followedDevices = old ? 0 : this.followRuntime(session);
+    // A session arriving from another Pi process (attach, detach, /resume) also retires what this
+    // process showed before, e.g. the empty session a fresh `pi` opened before /remote-control attach.
+    const followedDevices = !old || old.session.runtimeId!==session.runtimeId ? this.followRuntime(session) : 0;
+    // Moving ends when the session arrives in another Pi process; the old one may still send a last snapshot.
+    if(this.moving.get(session.sessionId)?.from!==session.runtimeId)this.moving.delete(session.sessionId);
     session.connection = 'online'; this.sessions.set(session.sessionId,{session,dispatch,owner}); this.sweepOffline();
     if(changed) { this.leases.delete(session.sessionId); this.event('context.changed',summary(session),session.sessionId); }
     const digest=hash(JSON.stringify(session));
@@ -90,8 +122,10 @@ export class RemoteCore extends EventEmitter {
       this.store.saveDevice({...d,grants});followed++;
     }
     for(const id of previous) {
-      // The replaced session stays readable (offline) on paired devices; clients switch to the live one.
-      const b=this.sessions.get(id)!;if(b.session.connection==='online'||b.offlineAt===undefined)b.offlineAt=this.clock.wall();
+      const b=this.sessions.get(id)!;
+      // An empty session has nothing to read: it disappears instead of cluttering the list.
+      if(!b.session.messages.length){this.sessions.delete(id);this.leases.delete(id);this.digests.delete(id);this.event('session.state',{...summary(b.session),connection:'offline',workState:'ended',removed:true},id);continue;}
+      // The replaced session stays readable (offline) on paired devices; clients switch to the live one.if(b.session.connection==='online'||b.offlineAt===undefined)b.offlineAt=this.clock.wall();
       b.session.connection='offline';b.session.workState='ended';
       this.leases.delete(id);this.digests.delete(id);
       this.event('session.state',summary(b.session),id);
@@ -142,7 +176,7 @@ export class RemoteCore extends EventEmitter {
   summaries(device: Device): unknown[] {
     this.checkDevice(device);
     this.sweepOffline();
-    return [...this.sessions.values()].filter(b=>this.grantFor(device,b.session.sessionId)).map(b=>{const {messages,...rest}=b.session;return {...structuredClone(rest),messageCount:messages.length,...(b.offlineAt?{offlineAt:b.offlineAt}:{})};});
+    return [...this.sessions.values()].filter(b=>this.grantFor(device,b.session.sessionId)).map(b=>{const {messages,...rest}=b.session;const preview=sessionPreview(messages);return {...structuredClone(rest),messageCount:messages.length,...(preview?{preview}:{}),...(b.offlineAt?{offlineAt:b.offlineAt}:{}),...(b.session.connection==='offline'&&this.isMoving(b.session.sessionId)?{moving:true}:{})};});
   }
   makePairing(sessionIds: string[],control: boolean,owner=false,ttlMs=PAIRING_TTL_MS): {token:string;requestId:string;expiresAt:number} {
     assert(sessionIds.every(id=>this.sessions.has(id)), 'session_not_found',404);
@@ -171,7 +205,7 @@ export class RemoteCore extends EventEmitter {
   /**
    * Signs in a browser on one of the owner's own Tailscale devices without a QR. Each browser gets
    * its own device record (cookie). Revoking a device of that node blocks automatic sign-in for the
-   * node until it is paired again with a QR, so "Cabut" keeps its meaning.
+   * node until it is paired again with a QR, so "Revoke" keeps its meaning.
    */
   tailscaleLogin(identity: {nodeId:string;nodeName:string}): {clientId:string;name:string;secret:string;expiresAt:number} {
     assert(typeof identity.nodeId==='string'&&identity.nodeId.length>0&&identity.nodeId.length<=128,'invalid_identity');
@@ -252,7 +286,8 @@ export class RemoteCore extends EventEmitter {
   list(device: Device): Session[] {this.checkDevice(device);return [...this.sessions.values()].filter(b=>this.grantFor(device,b.session.sessionId)).map(b=>structuredClone(b.session));}
   snapshot(device: Device,id: string): unknown {
     this.permit(device,id);const b=this.sessions.get(id);assert(b,'session_not_found',404);
-    return {session:structuredClone(b.session),lease:this.getLease(id),commands:this.store.commands(id).filter(c=>c.clientId===device.clientId||device.owner).slice(-50),cursor:this.store.cursor()};
+    const moving=b.session.connection==='offline'&&this.isMoving(id);
+    return {session:{...structuredClone(b.session),...(moving?{moving:true}:{})},lease:this.getLease(id),commands:this.store.commands(id).filter(c=>c.clientId===device.clientId||device.owner).slice(-50),cursor:this.store.cursor()};
   }
   getLease(id: string): Omit<Lease,'until'> | undefined {
     const l=this.leases.get(id);if(!l||l.until<=this.clock.mono())return undefined;
@@ -283,7 +318,12 @@ export class RemoteCore extends EventEmitter {
       assert(previous.clientId===device.clientId&&previous.hash===hash(canonical(raw)),'command_id_conflict',409);
       return previous;
     }
-    const c=parseCommand(value,this.clock.wall()); this.guard(device,c);
+    const c=parseCommand(value,this.clock.wall()); const target=this.guard(device,c);
+    // Resolved before the command is journaled, so a missing or unfinished file is a plain rejection.
+    // A Pi still running an older extension would drop the files, so it must advertise support.
+    const ids=c.payload.attachments;
+    if(ids)assert(this.resolveAttachments&&target.session.capabilities.includes('attachments'),'attachments_unsupported',409);
+    const outgoing:Command=ids?{...c,payload:{...c.payload,attachments:this.resolveAttachments!(device,ids) as never}}:c;
     const count=this.queued.get(c.sessionId)??0;
     assert(c.kind==='abort'||(count<20&&[...this.queued.values()].reduce((a,b)=>a+b,0)<100),'queue_full',429);
     const record:CommandRecord={...c,clientId:device.clientId,hash:hash(canonical(c)),status:'received',recordedAt:this.clock.wall()};
@@ -294,7 +334,7 @@ export class RemoteCore extends EventEmitter {
       let started=false;
       try {
         const b=this.guard(device,c);record.status='dispatching';this.store.saveCommand(record);started=true;
-        const result=await b.dispatch(c);
+        const result=await b.dispatch(outgoing);
         assert(['dispatched_unconfirmed','pi_acknowledged','completed','rejected','stale_context','indeterminate'].includes(result.status),'invalid_adapter_result');
         record.status=result.status;record.error=result.error;
         // Slash command output (messages, pickers) goes back to the caller only; it is never journaled.

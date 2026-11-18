@@ -16,33 +16,33 @@ const {values,positionals}=parseArgs({allowPositionals:true,options:{
 }});
 const action=positionals[0]??'start';
 if(values.help||action==='help') {
-  console.log(`Pi Remote Control: kendalikan sesi Pi dari HP/browser
+  console.log(`Pi Remote Control: control Pi sessions from your phone or browser
 
 Daemon
   npm start -- start [--host 127.0.0.1] [--port 3141] [--allow-http] [--origin URL]...
                      [--no-tailscale-login] [--data-dir PATH]
-                     [--workspace /repo/git] [--tools read,grep,find,ls,edit,write,bash] [--network] [--allow-checks]
-  npm start -- status                      daemon, alamat, sesi, perangkat
+                     [--workspace /git/repo] [--tools read,grep,find,ls,edit,write,bash] [--network] [--allow-checks]
+  npm start -- status                      daemon, addresses, sessions, devices
 
-Perangkat
-  npm start -- pair [--viewer] [--session ID]   tautan sekali pakai, 5 menit (owner kecuali --viewer)
-  npm start -- revoke ID_ATAU_PREFIX            cabut akses perangkat
+Devices
+  npm start -- pair [--viewer] [--session ID]   single-use link, 5 minutes (owner unless --viewer)
+  npm start -- revoke ID_OR_PREFIX              revoke a device's access
 
-Sesi background
-  npm start -- sessions                    daftar sesi background
-  npm start -- new [FOLDER]                jalankan Pi di background (default: folder ini)
-  npm start -- stop pi-rc-XXXXXX           hentikan sesi background
+Background sessions
+  npm start -- sessions                    list background sessions
+  npm start -- new [FOLDER]                start Pi in the background (default: this folder)
+  npm start -- stop pi-rc-XXXXXX           stop a background session
 
-Opsi start
-  --host 0.0.0.0 --allow-http   dengarkan semua antarmuka; semua IP mesin ini (LAN, Tailscale 100.x,
-                                loopback) dan nama MagicDNS Tailscale otomatis diizinkan
-  --origin URL                  izinkan origin persis lain (boleh diulang/dipisah koma)
-  --no-tailscale-login          matikan login otomatis perangkat di akun Tailscale yang sama
-  --data-dir PATH               lokasi data (default ~/.pi/remote-control, atau PI_REMOTE_DATA_DIR)
-  --workspace PATH              aktifkan orchestrator workflow pada repo Git ini
-  --tools LIST / --network / --allow-checks   kebijakan tool worker workflow (bukan sandbox OS)
+Start options
+  --host 0.0.0.0 --allow-http   listen on all interfaces; every IP of this machine (LAN, Tailscale 100.x,
+                                loopback) and its Tailscale MagicDNS name are allowed automatically
+  --origin URL                  allow another exact origin (repeatable or comma-separated)
+  --no-tailscale-login          turn off automatic sign-in for devices on the same Tailscale account
+  --data-dir PATH               data location (default ~/.pi/remote-control, or PI_REMOTE_DATA_DIR)
+  --workspace PATH              enable the workflow orchestrator on this Git repo
+  --tools LIST / --network / --allow-checks   workflow worker tool policy (not an OS sandbox)
 
-Di Pi: pasang paket ini (npm run pi:install) lalu ketik /remote-control. Panduan: docs/PANDUAN.md`);
+In Pi: install this package (npm run pi:install), then type /remote-control. Guide: docs/GUIDE.md`);
 } else await main();
 
 /** Best effort: the MagicDNS name of this machine, so http://NAME:PORT works on a wildcard listener. */
@@ -97,8 +97,8 @@ async function main() {
       const tailscale=values['no-tailscale-login']?undefined:tailscaleAuth();
       const tailscaleOwner=tailscale?await tailscale.ownerUserId():undefined;
       const app=await startServer({dataDir,secret,port,host:values.host,origin,hostnames,allowHttp:values['allow-http'],tailscale:tailscaleOwner?tailscale:undefined,workspace,tools,network:values.network,allowChecks:values['allow-checks']});
-      console.log(`Pi Remote Control:\n${app.urls.map(u=>`  ${u}`).join('\n')}\nListen: ${app.bindHost}:${port}\nIPC: ${app.socketPath}\nAktifkan /remote-control di Pi, lalu jalankan npm start -- pair.`);
-      console.log(tailscaleOwner?'Login Tailscale: aktif. Perangkat di akun Tailscale yang sama dengan mesin ini masuk tanpa QR (matikan: --no-tailscale-login).':'Login Tailscale: tidak aktif (Tailscale tidak berjalan atau --no-tailscale-login).');
+      console.log(`Pi Remote Control:\n${app.urls.map(u=>`  ${u}`).join('\n')}\nListen: ${app.bindHost}:${port}\nIPC: ${app.socketPath}\nTurn on /remote-control in Pi, then run npm start -- pair.`);
+      console.log(tailscaleOwner?'Tailscale sign-in: on. Devices on the same Tailscale account as this machine sign in without a QR (turn off: --no-tailscale-login).':'Tailscale sign-in: off (Tailscale is not running, or --no-tailscale-login).');
       if(workspace)console.log(`Workspace orchestrator: ${workspace}; tools: ${tools.join(',')}; concurrency default: 2`);
       let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;await app.close();await unlink(lockPath).catch(()=>{});};
       process.once('SIGINT',()=>void stop());process.once('SIGTERM',()=>void stop());
@@ -114,7 +114,7 @@ async function main() {
   const result=await new Promise<any>((ok,fail)=>{
     const socket=connect(join(dataDir,'bridge.sock'));let buffer='';
     const timer=setTimeout(()=>{socket.destroy();fail(new Error('Daemon request timed out'));},action==='stop'?20000:8000);
-    socket.setEncoding('utf8');socket.on('error',()=>{clearTimeout(timer);fail(new Error('Daemon belum berjalan. Jalankan npm start -- start.'));});
+    socket.setEncoding('utf8');socket.on('error',()=>{clearTimeout(timer);fail(new Error('The daemon is not running. Run npm start -- start.'));});
     socket.on('connect',()=>socket.write(JSON.stringify(message)+'\n'));
     socket.on('data',chunk=>{buffer+=chunk;if(buffer.includes('\n')){clearTimeout(timer);socket.end();try{ok(JSON.parse(buffer.slice(0,buffer.indexOf('\n'))));}catch(error){fail(error);}}});
   });

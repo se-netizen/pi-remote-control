@@ -3,11 +3,12 @@ import { assert } from './errors.js';
 
 export const MAX_FRAME = 256 * 1024;
 export const MAX_TEXT = 64 * 1024;
+export const MAX_ATTACHMENTS = 10;
 export const commandKinds = ['prompt', 'steer', 'follow_up', 'abort', 'command'] as const;
 export type CommandKind = typeof commandKinds[number];
 export interface Command {
   commandId: string; sessionId: string; runtimeId: string; bindingEpoch: number;
-  branchId: string; leaseEpoch: number; kind: CommandKind; payload: { text?: string }; expiresAt: number;
+  branchId: string; leaseEpoch: number; kind: CommandKind; payload: { text?: string; attachments?: string[] }; expiresAt: number;
 }
 export interface Session {
   sessionId: string; runtimeId: string; bindingEpoch: number; branchId: string;
@@ -43,9 +44,16 @@ export function parseCommand(value: unknown, now = Date.now()): Command {
   assert(Number.isSafeInteger(c.leaseEpoch) && Number(c.leaseEpoch) > 0, 'invalid_lease');
   assert(commandKinds.includes(c.kind as CommandKind), 'unsupported_capability');
   const p = object(c.payload);
-  assert(Object.keys(p).every(k => k === 'text'), 'unknown_field');
+  assert(Object.keys(p).every(k => k === 'text' || k === 'attachments'), 'unknown_field');
+  // Uploaded files (ids from /api/sessions/:id/uploads) travel with a message, never with a slash command.
+  if (p.attachments !== undefined) {
+    assert(['prompt', 'steer', 'follow_up'].includes(String(c.kind)), 'invalid_payload');
+    assert(Array.isArray(p.attachments) && p.attachments.length > 0 && p.attachments.length <= MAX_ATTACHMENTS, 'too_many_attachments');
+    p.attachments.forEach(identifier);
+    assert(new Set(p.attachments).size === p.attachments.length, 'duplicate_attachment');
+  }
   if (c.kind !== 'abort') {
-    assert(typeof p.text === 'string' && p.text.trim().length > 0, 'empty_prompt');
+    assert(typeof p.text === 'string' && (p.text.trim().length > 0 || p.attachments !== undefined), 'empty_prompt');
     assert(Buffer.byteLength(p.text) <= MAX_TEXT, 'prompt_too_large', 413);
     // Slash text is only accepted as an explicit `command`, never smuggled in as a prompt.
     if (c.kind === 'command') assert(/^\/[A-Za-z0-9][\w:.-]{0,63}(\s|$)/.test(p.text.trimStart()), 'invalid_command');

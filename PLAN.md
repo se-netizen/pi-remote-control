@@ -26,7 +26,7 @@ Asumsi awal: satu pemilik, perangkat pribadi, satu host pada M1, akses jaringan 
 
 Pengguna menjalankan `/remote-control`, membuka QR dari HP, menyetujui perangkat melalui terminal, lalu mengirim instruksi ke sesi yang sama. Aktivitas terlihat di terminal dan web. Saat jaringan putus, draft tetap ada dan keadaan sesi dipulihkan tanpa mengirim ulang instruksi secara buta.
 
-Keberhasilan produk dinilai dari penggunaan nyata: waktu sampai terhubung, keberhasilan handoff terminal ke HP, kejelasan antrean, pemulihan gangguan, dan kecocokan perilaku dengan Pi. Klaim lebih unggul dari Claude atau produk lain memerlukan benchmark dengan skenario dan kondisi setara.
+Keberhasilan produk dinilai dari penggunaan nyata: waktu sampai terhubung, keberhasilan handoff terminal ke HP, kejelasan antrean, pemulihan gangguan, dan kecocokan perilaku dengan Pi. Klaim lebih unggul dari produk lain memerlukan benchmark dengan skenario dan kondisi setara.
 
 ## Urutan milestone
 

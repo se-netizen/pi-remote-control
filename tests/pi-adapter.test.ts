@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PiRpcWorker } from '../src/pi/rpc-worker.js';
-import { AttachBridge, installRemoteControl, type AttachContext, type AttachPi } from '../src/pi/attach-bridge.js';
+import { AttachBridge, installRemoteControl, remoteControlCompletions, type AttachContext, type AttachPi, type CompletionItem } from '../src/pi/attach-bridge.js';
 import { JsonLines, type BridgeCommand } from '../src/pi/types.js';
 
 async function fakeWorker() {
@@ -152,7 +152,7 @@ test('attach dispatches only through same live TUI API, rejects stale binding, a
     assert.equal(bridge.handleCommand({ ...command, commandId: 'busy' }).status, 'rejected');
     assert.equal(bridge.handleCommand({ ...command, commandId: 'steer', kind: 'steer' }).status, 'dispatched_unconfirmed');
     assert.equal(sent.length, 2);
-    assert.ok(notices.some(n => n.includes('perangkat remote diteruskan sebagai arahan')), 'the terminal sees remote-originated input');
+    assert.ok(notices.some(n => n.includes('remote device sent as a steering message')), 'the terminal sees remote-originated input');
     // Pi rejects prompts during compaction only inside the terminal; the bridge must refuse up front.
     bridge.event({ type: 'session_before_compact' }, ctx);
     const compacting = bridge.handleCommand({ ...command, commandId: 'during-compaction', kind: 'follow_up' });
@@ -211,13 +211,13 @@ test('TUI startup advertises the command without exposing a session; /remote-con
   const bridge = installRemoteControl(pi, { socketPath, secretFile, url: 'https://old.example', binding: { runtimeId: 'pair-runtime', epoch: 0, enabled: false } });
   try {
     await events.get('session_start')!({ type: 'session_start', reason: 'startup' }, ctx);
-    assert.equal(notices[0], 'Remote Control tersedia: /remote-control');
+    assert.equal(notices[0], 'Remote Control available: /remote-control (Tab for options, /remote-control help)');
     assert.equal(records.length, 0); assert.equal(bridge.isEnabled(), false);
     await command('', ctx);
     assert.equal(bridge.url, 'http://10.91.128.250:3141');
     assert.deepEqual(bridge.urls, ['http://10.91.128.250:3141', 'http://100.74.43.35:3141', 'http://127.0.0.1:3141']);
     // Without a widget API the single best link (Tailscale) is shown, not a wall of URLs.
-    assert.equal(notices.at(-1), 'Buka di HP: http://100.74.43.35:3141/#pair=single-use-token');
+    assert.equal(notices.at(-1), 'Open on your phone: http://100.74.43.35:3141/#pair=single-use-token');
     const pairs = () => records.filter(r => r.type === 'admin' && r.action === 'pair');
     assert.deepEqual(pairs()[0]?.sessionIds, ['current-session-only']);
     assert.equal(pairs()[0]?.control, true); assert.equal(pairs()[0]?.owner, true);
@@ -226,10 +226,10 @@ test('TUI startup advertises the command without exposing a session; /remote-con
     await command('devices', ctx);
     assert.match(notices.at(-1)!, /Phone .*abcdef12/); assert.ok(!notices.at(-1)!.includes('\u001b')); assert.ok(!notices.at(-1)!.includes('Old'));
     await command('revoke abcdef12', ctx);
-    assert.equal(records.findLast(r => r.action === 'revoke')?.clientId, 'abcdef12'); assert.match(notices.at(-1)!, /Phone.*dicabut/);
-    await command('approve 123456', ctx); assert.match(notices.at(-1)!, /Gunakan \/remote-control/);
+    assert.equal(records.findLast(r => r.action === 'revoke')?.clientId, 'abcdef12'); assert.match(notices.at(-1)!, /Phone.*revoked/);
+    await command('approve 123456', ctx); assert.match(notices.at(-1)!, /Unknown option "approve 123456"/);
     const count = records.length;
-    await command('pair', { ...ctx, mode: 'rpc' }); assert.equal(records.length, count); assert.ok(notices.at(-1)?.includes('terminal Pi'));
+    await command('pair', { ...ctx, mode: 'rpc' }); assert.equal(records.length, count); assert.ok(notices.at(-1)?.includes('Pi terminal'));
     assert.ok(!notices.join('\n').includes('private-ipc-test-secret'));
   } finally {
     bridge.stop(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true });
@@ -351,13 +351,13 @@ test('/remote-control shows a QR widget that fits the terminal and is replaced b
     assert.ok(!factory(undefined, theme).render(30).some(l => l.includes('\u001b[48;5;231m')), 'too narrow for a QR: link only');
     ipc!.write(JSON.stringify({ type: 'paired', name: 'iPhone · Safari' }) + '\n');
     for (let i = 0; i < 40 && !notices.length; i++) await new Promise(resolve => setTimeout(resolve, 25));
-    assert.match(notices.at(-1)!, /iPhone · Safari terhubung/);
+    assert.match(notices.at(-1)!, /iPhone · Safari connected/);
     assert.equal(widgets.has('remote-control-pair'), false, 'QR is removed once a phone joins');
     // Once a phone is paired, /remote-control in a new session just exposes it: no QR to scan again.
     phones = [{ name: 'iPhone · Safari', clientId: 'p1', owner: true, revoked: false, expiresAt: Date.now() + 86_400_000 }, { name: 'iPhone · Safari', clientId: 'p2', owner: true, revoked: false }];
     await command('', ctx);
     assert.equal(widgets.has('remote-control-pair'), false);
-    assert.match(notices.at(-1)!, /Remote aktif · iPhone · Safari \(2\) bisa membuka sesi ini/);
+    assert.match(notices.at(-1)!, /Remote on · iPhone · Safari \(2\) can open this session/);
     await command('pair', ctx);
     assert.ok(widgets.has('remote-control-pair'), '/remote-control pair always shows a QR for a new device');
   } finally {
@@ -371,7 +371,7 @@ test('remote slash commands: built-ins, pickers, Pi extension commands, and term
   const models = [{ provider: 'acme', id: 'acme-pro', name: 'Pro' }, { provider: 'acme', id: 'acme-lite', name: 'Lite' }, { provider: 'openai', id: 'gpt-x' }];
   const pi: AttachPi = {
     on: () => {}, registerCommand: () => {}, getThinkingLevel: () => thinking,
-    sendUserMessage: (text, options) => { sent.push({ text, options }); },
+    sendUserMessage: (text, options) => { sent.push({ text: String(text), options }); },
     getCommands: () => [{ name: 'remote-control', source: 'extension' }, { name: 'commit', description: 'Buat commit', source: 'prompt' }, { name: 'skill:review', source: 'skill' }, { name: 'model', source: 'extension' }],
     setModel: async (m: any) => { if (m.provider === 'openai') return false; model = m; return true; },
     setThinkingLevel: level => { thinking = level === 'max' ? 'xhigh' : level; },
@@ -402,27 +402,27 @@ test('remote slash commands: built-ins, pickers, Pi extension commands, and term
     assert.equal(picker.status, 'completed'); assert.equal(picker.output.choices[0].label, 'acme/acme-pro'); assert.equal(picker.output.choices[0].current, true);
     assert.equal((await run('/model lite')).output.message, 'Model: acme/acme-lite'); assert.equal(model.id, 'acme-lite');
     assert.equal((await run('/model acme')).output.choices.length, 2, 'ambiguous query opens a filtered picker');
-    assert.match((await run('/model gpt-x')).error, /Autentikasi provider openai/);
-    assert.match((await run('/model nope')).error, /tidak ditemukan/);
+    assert.match((await run('/model gpt-x')).error, /Authentication for provider openai/);
+    assert.match((await run('/model nope')).error, /not found/);
     assert.equal((await run('/thinking')).output.choices.find((c: any) => c.current).label, 'medium');
-    assert.match((await run('/thinking max')).output.message, /xhigh \(disesuaikan/);
-    assert.match((await run('/thinking turbo')).error, /Level tidak dikenal/);
-    assert.equal((await run('/name Perbaiki login')).output.message, 'Nama sesi: Perbaiki login'); assert.equal(name, 'Perbaiki login');
-    assert.match((await run('/session')).output.message, /42\.000 \/ 200\.000 token \(21%\)/);
-    assert.equal((await run('/compact fokus ke auth')).status, 'dispatched_unconfirmed'); assert.deepEqual((compacted as any).customInstructions, 'fokus ke auth');
+    assert.match((await run('/thinking max')).output.message, /xhigh \(adjusted/);
+    assert.match((await run('/thinking turbo')).error, /Unknown level/);
+    assert.equal((await run('/name Fix login')).output.message, 'Session name: Fix login'); assert.equal(name, 'Fix login');
+    assert.match((await run('/session')).output.message, /42,000 \/ 200,000 tokens \(21%\)/);
+    assert.equal((await run('/compact focus on auth')).status, 'dispatched_unconfirmed'); assert.deepEqual((compacted as any).customInstructions, 'focus on auth');
     idle = false;
-    assert.match((await run('/compact')).error, /Pi sedang bekerja/);
-    assert.match((await run('/new')).error, /Jalankan \/remote-control sekali di terminal/);
-    assert.match((await run('/settings')).error, /hanya bisa dijalankan di terminal/);
-    assert.match((await run('/remote-control stop')).error, /hanya bisa dijalankan di terminal/);
-    assert.match((await run('/tidakada')).error, /tidak dikenal/);
-    assert.equal((await run('/commit pesan rapi')).status, 'dispatched_unconfirmed');
-    assert.deepEqual(sent.at(-1), { text: '/commit pesan rapi', options: { expandPromptTemplates: true, deliverAs: 'followUp' } }, 'Pi expands templates/extension commands itself; queued while busy');
+    assert.match((await run('/compact')).error, /Pi is working/);
+    assert.match((await run('/new')).error, /Run \/remote-control once in the terminal/);
+    assert.match((await run('/settings')).error, /can only run in the Pi terminal/);
+    assert.match((await run('/remote-control stop')).error, /can only run in the Pi terminal/);
+    assert.match((await run('/nosuchcommand')).error, /Unknown command \/nosuchcommand/);
+    assert.equal((await run('/commit tidy message')).status, 'dispatched_unconfirmed');
+    assert.deepEqual(sent.at(-1), { text: '/commit tidy message', options: { expandPromptTemplates: true, deliverAs: 'followUp' } }, 'Pi expands templates/extension commands itself; queued while busy');
     idle = true;
     bridge.setCommandContext({ ...ctx, newSession: async (options?: any) => { newSessions++; await options?.withSession?.({ ...ctx }); }, reload: async () => {} });
     assert.ok((bridge.remoteCommands()).some(c => c.name === 'new'));
     assert.equal((await run('/new')).status, 'dispatched_unconfirmed'); await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(newSessions, 1);
-    assert.ok(notices.some(n => n.includes('membuat sesi baru')));
+    assert.ok(notices.some(n => n.includes('started a new session')));
   } finally { bridge.stop(); }
 });
 
@@ -452,20 +452,20 @@ test('/remote-control auto makes every new Pi session register by itself, and ca
   let bridge = installRemoteControl(pi, { socketPath, secretFile, binding });
   try {
     await command('auto', ctx);
-    assert.match(notices.at(-1)!, /Auto remote aktif/);
+    assert.match(notices.at(-1)!, /Auto remote on/);
     assert.equal(registered.length, 1);
     // A brand-new Pi process: the binding is fresh (not enabled), only the auto flag survives.
     bridge.stop(); registered.length = 0; sessionId = 'second';
     bridge = installRemoteControl(pi, { socketPath, secretFile, binding: { runtimeId: 'other-process', epoch: 0, enabled: false } });
     await events.get('session_start')!({ type: 'session_start', reason: 'startup' }, ctx);
     assert.deepEqual(registered, ['second'], 'registered without typing /remote-control');
-    assert.match(notices.at(-1)!, /Remote aktif otomatis/);
+    assert.match(notices.at(-1)!, /Remote on automatically/);
     await command('auto off', ctx);
     bridge.stop(); registered.length = 0;
     bridge = installRemoteControl(pi, { socketPath, secretFile, binding: { runtimeId: 'third-process', epoch: 0, enabled: false } });
     await events.get('session_start')!({ type: 'session_start', reason: 'startup' }, ctx);
     assert.deepEqual(registered, [], 'auto off: nothing is exposed until /remote-control');
-    assert.equal(notices.at(-1), 'Remote Control tersedia: /remote-control');
+    assert.equal(notices.at(-1), 'Remote Control available: /remote-control (Tab for options, /remote-control help)');
   } finally {
     bridge.stop(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true });
   }
@@ -499,7 +499,7 @@ test('/remote-control pair wifi shows a QR with the sealed-key link to a private
     assert.equal(asked[0]?.action, 'pair'); assert.equal(asked[0]?.wifi, true); assert.equal(asked[0]?.owner, true);
     const factory = widgets.get('remote-control-pair') as (tui: unknown, theme: unknown) => { render(width: number): string[] };
     const lines = factory(undefined, undefined).render(100).map(l => l.replace(/\u001b\[[0-9;]*m/g, ''));
-    assert.match(lines[0]!, /Wi-Fi yang sama \(terenkripsi\)/);
+    assert.match(lines[0]!, /same Wi-Fi \(encrypted\)/);
     assert.ok(lines.join('').includes('http://10.91.128.250:3141/#w=req12.KEY_abc-123'), 'a private LAN address is preferred over a container bridge');
     assert.equal(notices.length, 0);
   } finally {
@@ -540,7 +540,7 @@ test('/remote-control detach hands the session file to the daemon with this PID,
     await command('detach', ctx);
     const handoff = daemon.records.find(r => r.action === 'background.handoff')!;
     assert.deepEqual({ cwd: handoff.cwd, sessionFile: handoff.sessionFile, pid: handoff.pid }, { cwd: '/home/u/proj', sessionFile: file, pid: process.pid });
-    assert.match(notices.at(-1)!, /pindah ke background \(pi-rc-abc123\)/); assert.match(notices.at(-1)!, /tmux attach -t pi-rc-abc123/);
+    assert.match(notices.at(-1)!, /moved to the background \(pi-rc-abc123\)/); assert.match(notices.at(-1)!, /tmux attach -t pi-rc-abc123/);
     await new Promise(r => setTimeout(r, 500));
     assert.equal(shutdowns, 1, 'the terminal Pi quits so only the background Pi writes the session');
     file = undefined;
@@ -550,10 +550,14 @@ test('/remote-control detach hands the session file to the daemon with this PID,
 });
 
 test('/remote-control attach releases the background session, then switches this Pi to its file with remote kept on', async () => {
+  const files = await mkdtemp(join(tmpdir(), 'pi-attach-files-'));
+  await writeFile(join(files, 'a.jsonl'), '{}\n'); await writeFile(join(files, 'b.jsonl'), '{}\n');
   const list = [
-    { name: 'pi-rc-aaaaaa', backend: 'tmux', cwd: '/home/u/a', title: 'A', workState: 'idle', sessionFile: '/s/a.jsonl' },
-    { name: 'pi-rc-bbbbbb', backend: 'rpc', cwd: '/home/u/b', title: 'B', workState: 'idle', sessionFile: '/s/b.jsonl' },
+    { name: 'pi-rc-aaaaaa', backend: 'tmux', cwd: '/home/u/a', title: 'proj', workState: 'idle', sessionFile: join(files, 'a.jsonl'), messageCount: 8, preview: 'fix the login bug', createdAt: Date.now() - 5 * 60_000 },
+    { name: 'pi-rc-bbbbbb', backend: 'rpc', cwd: '/home/u/a', title: 'proj', workState: 'idle', sessionFile: join(files, 'b.jsonl'), messageCount: 3, preview: 'write the release notes', createdAt: Date.now() - 2 * 3600_000 },
+    { name: 'pi-rc-cccccc', backend: 'tmux', cwd: '/home/u/a', title: 'proj', workState: 'idle', sessionFile: join(files, 'never-written.jsonl'), messageCount: 0 },
   ];
+  let offered: string[] = []; let pick = 'pi-rc-bbbbbb';
   const daemon = await fakeDaemon(r => r.action === 'background.list' ? { sessions: list } : r.action === 'background.release' ? { status: 'released' } : {});
   const notices: string[] = []; const switched: string[] = []; let command!: (args: string, ctx: AttachContext) => Promise<void>;
   const pi: AttachPi = { on: () => {}, registerCommand: (_n, d) => { command = d.handler; }, sendUserMessage: () => {}, getThinkingLevel: () => 'off' };
@@ -561,20 +565,31 @@ test('/remote-control attach releases the background session, then switches this
   const ctx: AttachContext = {
     mode: 'tui', cwd: '/home/u', isIdle: () => true, abort: () => {},
     switchSession: async path => { switched.push(path); },
-    ui: { notify: text => { notices.push(text); }, select: async (_title, options) => options.find(o => o.includes('pi-rc-bbbbbb')) },
+    ui: { notify: text => { notices.push(text); }, select: async (_title, options) => { offered = options; return options.find(o => o.includes(pick)); } },
     sessionManager: { getSessionId: () => 'here', getLeafId: () => null, getSessionName: () => 'H', buildSessionProjection: () => ({ messages: [] }) },
   };
   const bridge = installRemoteControl(pi, { socketPath: daemon.socketPath, secretFile: daemon.secretFile, binding });
   try {
     await command('attach', ctx);
     assert.deepEqual(daemon.records.filter(r => r.action === 'background.release').map(r => r.name), ['pi-rc-bbbbbb'], 'the picked session is released first');
-    assert.deepEqual(switched, ['/s/b.jsonl']);
+    assert.deepEqual(switched, [join(files, 'b.jsonl')]);
     assert.equal(binding.enabled, true, 'the next extension instance reconnects so the phone keeps the session');
+    // Sessions in the same folder are told apart by their last request, size and age.
+    assert.equal(offered[0], '"fix the login bug" — a · 8 msg · 5m ago (pi-rc-aaaaaa)');
+    assert.equal(offered[1], '"write the release notes" — a · 3 msg · 2h ago (pi-rc-bbbbbb)');
+    assert.equal(offered[2], '(empty) — a · 0 msg (pi-rc-cccccc)');
+    // A background session that never got a message has no file: it is closed and this Pi stays put.
+    pick = 'pi-rc-cccccc';
+    await command('attach', ctx);
+    assert.equal(daemon.records.filter(r => r.action === 'background.release').at(-1)?.name, 'pi-rc-cccccc');
+    assert.equal(daemon.records.filter(r => r.action === 'background.release').at(-1)?.moving, false);
+    assert.equal(switched.length, 1, 'no switch to a file that does not exist');
+    assert.match(notices.at(-1)!, /no messages yet/);
     await command('attach show pi-rc-bbbbbb', ctx);
-    assert.match(notices.at(-1)!, /attach show butuh tmux/);
+    assert.match(notices.at(-1)!, /attach show needs tmux/);
     await command('attach pi-rc-ffffff', ctx);
-    assert.match(notices.at(-1)!, /tidak ditemukan/);
-  } finally { bridge.stop(); await daemon.close(); }
+    assert.match(notices.at(-1)!, /Session pi-rc-ffffff not found/);
+  } finally { bridge.stop(); await daemon.close(); await rm(files, { recursive: true, force: true }); }
 });
 
 test('a daemon-launched background Pi registers by itself (also in RPC mode) and obeys shutdown; terminal sessions do not', async () => {
@@ -608,4 +623,48 @@ test('a daemon-launched background Pi registers by itself (also in RPC mode) and
     bridge?.stop(); await daemon.close();
     for (const [k, v] of [['PI_REMOTE_AUTOSTART', saved.a], ['PI_REMOTE_BACKGROUND', saved.b], ['PI_REMOTE_BACKGROUND_BACKEND', saved.c]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   }
+});
+
+test('/remote-control offers its options after a space (and on Tab), with real background sessions and devices', async () => {
+  const daemon = await fakeDaemon(r => r.action === 'background.list'
+    ? { sessions: [
+      { name: 'pi-rc-aaaaaa', backend: 'tmux', cwd: '/home/u/proj', preview: 'fix the login bug', messageCount: 8, createdAt: Date.now() - 5 * 60_000, workState: 'running' },
+      { name: 'pi-rc-bbbbbb', backend: 'rpc', cwd: '/home/u/proj', messageCount: 0, createdAt: Date.now() },
+    ] }
+    : r.action === 'status' ? { devices: [{ clientId: 'db9cce91-0000-4000-8000-000000000000', name: 'Android · Chrome', owner: true, revoked: false }, { clientId: 'deadbeef-0000', name: 'Old', revoked: true }] } : {});
+  let options!: { description: string; getArgumentCompletions?: (prefix: string) => unknown; handler: (args: string, ctx: AttachContext) => Promise<void> };
+  const pi: AttachPi = { on: () => {}, registerCommand: (_n, d) => { options = d; }, sendUserMessage: () => {}, getThinkingLevel: () => 'off' };
+  const bridge = installRemoteControl(pi, { socketPath: daemon.socketPath, secretFile: daemon.secretFile, binding: { runtimeId: 'tab', epoch: 0, enabled: false } });
+  const values = async (prefix: string) => ((await options.getArgumentCompletions!(prefix)) as CompletionItem[] | null)?.map(i => i.value) ?? null;
+  try {
+    assert.match(options.description, /Tab for options/);
+    assert.deepEqual(await values(''), ['settings', 'pair', 'pair wifi', 'detach', 'attach', 'attach show', 'auto on', 'auto off', 'status', 'devices', 'revoke', 'stop', 'help']);
+    assert.deepEqual(await values('de'), ['detach', 'devices']);
+    assert.deepEqual(await values('wifi'), ['pair wifi'], 'a word inside an option also finds it');
+    assert.equal(await values('xyz'), null);
+    const auto = (await options.getArgumentCompletions!('auto')) as CompletionItem[];
+    assert.match(auto.find(i => i.value === 'auto off')!.description!, /\(current\)/, 'the current auto setting is marked');
+    // Choosing a session: the daemon's background sessions, told apart by their last message.
+    const attach = (await options.getArgumentCompletions!('attach ')) as CompletionItem[];
+    assert.deepEqual(attach.map(i => i.value), ['attach show', 'attach pi-rc-aaaaaa', 'attach show pi-rc-aaaaaa', 'attach pi-rc-bbbbbb']);
+    assert.equal(attach[1]!.description, '"fix the login bug" · 8 msg · 5m ago · working');
+    assert.equal(attach[3]!.description, '(empty) · 0 msg · just now');
+    assert.deepEqual(await values('attach show '), ['attach show pi-rc-aaaaaa'], 'show only lists tmux sessions');
+    assert.deepEqual(await values('revoke '), ['revoke db9cce91'], 'revoked devices are not offered');
+    assert.equal(((await options.getArgumentCompletions!('revoke ')) as CompletionItem[])[0]!.description, 'Android · Chrome · owner');
+    assert.equal(daemon.records.filter(r => r.action === 'background.list').length, 1, 'repeated keystrokes reuse the answer for a few seconds');
+    // help, and unknown options answer with the same overview.
+    const notices: string[] = [];
+    const ctx: AttachContext = { mode: 'tui', cwd: '/home/u', isIdle: () => true, abort: () => {}, ui: { notify: text => { notices.push(text); } },
+      sessionManager: { getSessionId: () => 'here', getLeafId: () => null, getSessionName: () => 'H', buildSessionProjection: () => ({ messages: [] }) } };
+    await options.handler('help', ctx);
+    assert.match(notices.at(-1)!, /^Remote Control: use this Pi session/);
+    assert.match(notices.at(-1)!, /detach +Keep this session running in the background/);
+    await options.handler('dettach', ctx);
+    assert.match(notices.at(-1)!, /^Unknown option "dettach"\.\nRemote Control:/);
+  } finally { bridge.stop(); await daemon.close(); }
+  // Without a daemon the static options still work.
+  let offline!: typeof options;
+  installRemoteControl({ on: () => {}, registerCommand: (_n, d) => { offline = d; }, sendUserMessage: () => {}, getThinkingLevel: () => 'off' }, { socketPath: join(tmpdir(), 'no-daemon.sock'), secretFile: join(tmpdir(), 'no-such-secret') });
+  assert.deepEqual(((await offline.getArgumentCompletions!('attach ')) as CompletionItem[]).map(i => i.value), ['attach show']);
 });

@@ -4,7 +4,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, chmod, unlink, stat } from 'node:fs/promises';
 import { dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RemoteCore } from './core.js';
+import { RemoteCore, sessionPreview } from './core.js';
 import { assert, RemoteError } from './errors.js';
 import { MAX_FRAME, object, type Command, type Device } from './protocol.js';
 import { Store } from './store.js';
@@ -13,6 +13,7 @@ import type { WorkflowPolicy } from './workflow/types.js';
 import { PiRpcWorker } from './pi/rpc-worker.js';
 import { BackgroundManager } from './background.js';
 import { OriginPolicy } from './origins.js';
+import { UploadStore, UPLOAD_CHUNK_BYTES } from './uploads.js';
 import { isTailscaleAddress, ownerDevice, peerAddress, type TailscaleAuth } from './tailscale.js';
 import { ReplayGuard, SEAL_CONTENT_TYPE, SEAL_DATA_HEADER, SEAL_HEADER, SEAL_MAX_SKEW_MS, eventAad, open as openSeal, parseSealHeader, requestAad, responseAad, seal, type PeerPath } from './seal.js';
 
@@ -38,6 +39,20 @@ export async function startServer(options: ServerOptions) {
   const store=new Store(resolve(options.dataDir,'bridge.sqlite'));
   const core=new RemoteCore(store);
   core.setMaxListeners(500); // one listener pair per open browser stream
+  const uploads=new UploadStore(resolve(options.dataDir,'uploads'));
+  /**
+   * Remote settings changed from `/remote-control settings` in Pi. Stored here so every Pi and every
+   * phone sees the same values; each one is enforced by the daemon, not just hidden in a UI.
+   */
+  type RemoteSettings={tailscaleLogin:boolean;lan:boolean;uploads:boolean;activity:boolean};
+  const SETTING_KEYS=['tailscaleLogin','lan','uploads','activity'] as const;
+  function remoteSettings():RemoteSettings{
+    const saved=store.get<Partial<RemoteSettings>>('remote')??{};
+    return {tailscaleLogin:saved.tailscaleLogin!==false,lan:saved.lan!==false,uploads:saved.uploads!==false,activity:saved.activity!==false};
+  }
+  const lanAvailable=()=>!['127.0.0.1','::1','localhost'].includes(host)&&options.allowHttp===true;
+  core.resolveAttachments=(device,ids)=>{assert(remoteSettings().uploads,'uploads_disabled',403);return uploads.resolve(device.clientId,ids);};
+  void uploads.prune(true).catch(()=>{});
   const background=options.background??new BackgroundManager({env:{PI_REMOTE_SOCKET:resolve(options.dataDir,'bridge.sock'),PI_REMOTE_SECRET_FILE:resolve(options.dataDir,'bridge.secret')}});
   void background.reconcile().catch(()=>{});
   /** Folders of recently registered sessions, offered when starting a background session. */
@@ -61,7 +76,8 @@ export async function startServer(options: ServerOptions) {
     const sessions=background.list().map(e=>{
       const live=[...core.sessions.values()].find(b=>(b.session as unknown as {background?:{name?:string}}).background?.name===e.name&&b.session.connection==='online');
       const info=(live?.session as unknown as {background?:{sessionFile?:string}}|undefined)?.background;
-      return {...e,sessionId:live?.session.sessionId,title:live?.session.title,workState:live?.session.workState,sessionFile:e.sessionFile??info?.sessionFile,attach:background.attachCommand(e.name)};
+      const messages=live?.session.messages??[];
+      return {...e,sessionId:live?.session.sessionId,title:live?.session.title,workState:live?.session.workState,sessionFile:e.sessionFile??info?.sessionFile,attach:background.attachCommand(e.name),...(live?{messageCount:messages.length,preview:sessionPreview(messages)}:{})};
     });
     return {backend,tmux:await background.tmuxAvailable(),sessions,folders:store.get<string[]>('recentFolders')??[]};
   }
@@ -93,7 +109,7 @@ export async function startServer(options: ServerOptions) {
             assert(typeof m.secret==='string'&&m.secret.length===options.secret.length&&timingSafeEqual(Buffer.from(m.secret),Buffer.from(options.secret)),'unauthenticated',401);
             authenticated=true;clearTimeout(deadline);
             if(m.type==='admin'){const reply=admin(m);if(reply instanceof Promise){reply.then(v=>{send(v);socket.end();},e=>{send({error:e instanceof RemoteError?e.code:'admin_failed'});socket.end();});}else{send(reply);socket.end();}continue;}
-            assert(m.type==='register','registration_required');background.setLauncher(m.launcher);const registered=core.register(m.session,dispatch,socket);rememberFolder(registered.cwd);send({type:'registered',hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),followedDevices:registered.followedDevices??0});continue;
+            assert(m.type==='register','registration_required');background.setLauncher(m.launcher);const registered=core.register(m.session,dispatch,socket);rememberFolder(registered.cwd);send({type:'registered',hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),followedDevices:registered.followedDevices??0,settings:remoteSettings()});continue;
           }
           if(m.type==='register'||m.type==='snapshot')core.register(m.session,dispatch,socket);
           else if(m.type==='event'){assert(typeof m.sessionId==='string','invalid_id');core.adapterEvent(m.sessionId,m.event,socket);}
@@ -113,7 +129,18 @@ export async function startServer(options: ServerOptions) {
     });
   });
   function admin(m: Record<string,unknown>): unknown {
+    if(m.action==='settings.get')return {settings:remoteSettings(),available:{tailscaleLogin:!!options.tailscale,lan:lanAvailable()},pid:process.pid,version:'0.1.0',dataDir:options.dataDir};
+    if(m.action==='settings.set') {
+      const key=String(m.key) as typeof SETTING_KEYS[number];
+      assert(SETTING_KEYS.includes(key)&&typeof m.value==='boolean','invalid_setting');
+      const next={...remoteSettings(),[key]:m.value};store.set('remote',next);
+      // Every connected Pi learns the new values (e.g. whether to show remote activity notices).
+      const notified=new Set<Socket>();
+      for(const b of core.sessions.values()){const owner=b.owner as Socket;if(b.session.connection!=='online'||notified.has(owner)||owner.destroyed)continue;notified.add(owner);owner.write(JSON.stringify({type:'settings',settings:next})+'\n');}
+      return {settings:next};
+    }
     if(m.action==='pair'&&m.wifi===true) {
+      assert(remoteSettings().lan,'lan_disabled',409);
       const ids=Array.isArray(m.sessionIds)?m.sessionIds.map(String):[...core.sessions.keys()];
       const pairing=core.makeWifiPairing(ids,m.owner!==false);
       // Wi-Fi/LAN addresses only: Tailscale and loopback do not need the sealed path.
@@ -139,17 +166,24 @@ export async function startServer(options: ServerOptions) {
       const exists=await stat(file).then(s=>s.isFile()).catch(()=>false);
       const pid=Number(m.pid);assert(Number.isSafeInteger(pid)&&pid>1,'invalid_pid');
       const name=background.newName(),backend=await background.backend();
+      // Phones keep showing this session while it moves instead of jumping to another one.
+      if(typeof m.sessionId==='string')core.markMoving(m.sessionId,90_000);
       void background.start({cwd,...(exists?{sessionFile:file}:{}),afterPid:pid,name}).catch(()=>{});
       return {name,backend,attach:backend==='tmux'?`tmux attach -t ${name}`:undefined,fresh:!exists};
     })();
-    if(m.action==='background.release')return background.stop(String(m.name),()=>askShutdown(String(m.name)),20_000).then(()=>({status:'released'}));
+    if(m.action==='background.release') {
+      // /remote-control attach: this session comes back in a terminal Pi right after the background one quits.
+      const live=[...core.sessions.values()].find(b=>(b.session as unknown as {background?:{name?:string}}).background?.name===String(m.name)&&b.session.connection==='online');
+      if(live&&m.moving!==false)core.markMoving(live.session.sessionId,60_000);
+      return background.stop(String(m.name),()=>askShutdown(String(m.name)),20_000).then(()=>({status:'released'}));
+    }
     if(m.action==='revoke') {
       const id=String(m.clientId??'');assert(id.length>=4,'device_id_required');
       const matches=store.devices().filter(d=>!d.revoked&&(d.clientId===id||d.clientId.startsWith(id)));
       assert(matches.length===1,matches.length?'device_ambiguous':'device_not_found',matches.length?409:404);
       core.revokeLocal(matches[0]!.clientId);return {status:'revoked',clientId:matches[0]!.clientId,name:matches[0]!.name};
     }
-    if(m.action==='status')return {hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),bindHost:host,port,sessions:[...core.sessions.values()].map(b=>{const {messages,...rest}=b.session;return rest;}),devices:store.devices().map(({clientId,name,grants,owner,revoked,expiresAt})=>({clientId,name,grants,owner,revoked,expiresAt})),workspace:options.workspace??null};
+    if(m.action==='status')return {hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),bindHost:host,port,sessions:[...core.sessions.values()].map(b=>{const {messages,...rest}=b.session;return rest;}),devices:store.devices().map(({clientId,name,grants,owner,revoked,expiresAt,via})=>({clientId,name,grants,owner,revoked,expiresAt,via})),workspace:options.workspace??null};
     throw new RemoteError('unknown_admin_action');
   }
   // Tell the terminal that owns a session which device just joined it.
@@ -218,9 +252,12 @@ export async function startServer(options: ServerOptions) {
     if(ip==='::1'||ip.startsWith('127.'))return 'loopback';
     return isTailscaleAddress(ip)?'tailscale':'lan';
   }
-  async function rawBody(req:IncomingMessage):Promise<string> {
+  /** Upload chunks are the only requests larger than a frame (512 KiB of file, base64 in JSON, maybe sealed). */
+  const UPLOAD_BODY=Math.ceil(UPLOAD_CHUNK_BYTES*4/3)+4096;
+  const isUploadChunk=(url:URL)=>url.pathname.startsWith('/api/uploads/');
+  async function rawBody(req:IncomingMessage,limit=MAX_FRAME*2):Promise<string> {
     let size=0;const chunks:Buffer[]=[];
-    for await(const chunk of req){size+=chunk.length;assert(size<=MAX_FRAME*2,'frame_too_large',413);chunks.push(chunk);}
+    for await(const chunk of req){size+=chunk.length;assert(size<=limit,'frame_too_large',413);chunks.push(chunk);}
     return Buffer.concat(chunks).toString('utf8');
   }
   /** Opens a sealed request; the result authenticates the device (no cookie on the Wi-Fi path). */
@@ -236,7 +273,7 @@ export async function startServer(options: ServerOptions) {
     let data=dataFromQuery;
     if(data===undefined) {
       if(bodyless)data=String(req.headers[SEAL_DATA_HEADER]??'');
-      else {assert(req.headers['content-type']?.split(';')[0]===SEAL_CONTENT_TYPE,'seal_invalid',401);data=(await rawBody(req)).trim();}
+      else {assert(req.headers['content-type']?.split(';')[0]===SEAL_CONTENT_TYPE,'seal_invalid',401);data=(await rawBody(req,isUploadChunk(url)?Math.ceil(UPLOAD_BODY*4/3)+1024:MAX_FRAME*2)).trim();}
     }
     let plaintext:string;
     try{plaintext=openSeal(key,h.nonce,data,requestAad(method,path,h.device,h.t));}catch{throw new RemoteError('seal_invalid',401);}
@@ -244,11 +281,11 @@ export async function startServer(options: ServerOptions) {
     assert(replay.remember(h.nonce),'seal_replay',401);
     return {key,device:h.device,t:h.t,nonce:h.nonce,method,path,...(plaintext?{body:JSON.parse(plaintext)}:{})};
   }
-  async function body(req:IncomingMessage):Promise<any> {
+  async function body(req:IncomingMessage,limit=MAX_FRAME):Promise<any> {
     const sealed=sealedRequests.get(req);
     if(sealed){assert(!shuttingDown,'shutting_down',503);return sealed.body??{};}
     let size=0;const chunks:Buffer[]=[];
-    for await(const chunk of req){size+=chunk.length;assert(size<=MAX_FRAME,'frame_too_large',413);chunks.push(chunk);}
+    for await(const chunk of req){size+=chunk.length;assert(size<=limit,'frame_too_large',413);chunks.push(chunk);}
     assert(req.headers['content-type']?.split(';')[0]==='application/json','json_required',415);
     assert(!shuttingDown,'shutting_down',503);
     try{return JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{throw new RemoteError('invalid_json');}
@@ -260,7 +297,7 @@ export async function startServer(options: ServerOptions) {
   /** A readable default name from the browser, e.g. "iPhone · Safari". Only a label, never trusted. */
   function deviceName(agent: unknown): string {
     const ua=String(agent??'');
-    const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Mac OS X/.test(ua)?'Mac':/Windows/.test(ua)?'Windows':/Linux/.test(ua)?'Linux':'Perangkat';
+    const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Mac OS X/.test(ua)?'Mac':/Windows/.test(ua)?'Windows':/Linux/.test(ua)?'Linux':'Device';
     const browser=/EdgA?\//.test(ua)?'Edge':/SamsungBrowser/.test(ua)?'Samsung Internet':/Firefox|FxiOS/.test(ua)?'Firefox':/Chrome|CriOS/.test(ua)?'Chrome':/Safari/.test(ua)?'Safari':'Browser';
     return `${os} · ${browser}`;
   }
@@ -300,11 +337,11 @@ export async function startServer(options: ServerOptions) {
     const shown=escapeHtml(String(req.headers.host??'').slice(0,200));
     if((req.url??'/').startsWith('/api/')||(req.method!=='GET'&&req.method!=='HEAD')){json(res,403,{error:'invalid_host',message:'invalid_host'});return;}
     res.writeHead(403,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
-    res.end(`<!doctype html><html lang="id"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Alamat belum diizinkan</title><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5"><h1>Alamat belum diizinkan</h1><p>Daemon Pi Remote Control menerima permintaan ke <code>${shown}</code>, tetapi alamat itu tidak ada dalam daftar origin yang diizinkan.</p><p>Jalankan ulang daemon dengan <code>--origin http://${shown}</code> (opsi ini boleh diulang), atau pakai <code>--host 0.0.0.0 --allow-http</code> agar semua alamat IP mesin ini, termasuk IP Tailscale, otomatis diizinkan. Jalankan <code>/remote-control status</code> di Pi untuk melihat alamat yang aktif.</p></body></html>`);
+    res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Address not allowed</title><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5"><h1>Address not allowed</h1><p>The Pi Remote Control daemon received a request for <code>${shown}</code>, but that address is not in its list of allowed origins.</p><p>Restart the daemon with <code>--origin http://${shown}</code> (you can repeat this option), or use <code>--host 0.0.0.0 --allow-http</code> so every IP address of this machine, including its Tailscale IP, is allowed automatically. Run <code>/remote-control status</code> in Pi to see the active addresses.</p></body></html>`);
   }
   const http=createHttpServer(async(req,res)=>{
     res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     try {
       assert(!shuttingDown,'shutting_down',503);
       const origin=origins.originForHost(req.headers.host);
@@ -313,10 +350,20 @@ export async function startServer(options: ServerOptions) {
       const url=new URL(req.url??'/',origin);
       if(req.method!=='GET'&&req.method!=='HEAD') {
         assert(req.headers.origin===origin,'invalid_origin',403);
-        assert(req.headers['x-pi-remote']==='1','csrf_required',403);rate(req,120,'mutations');
+        assert(req.headers['x-pi-remote']==='1','csrf_required',403);
+        // A 25 MiB file is 50 chunk requests; they get their own budget so uploads never starve messages.
+        if(isUploadChunk(url))rate(req,600,'upload-chunks');else rate(req,120,'mutations');
       } else if(req.headers.origin)assert(req.headers.origin===origin,'invalid_origin',403);
       // Wi-Fi/LAN has no transport encryption: every API call there must be sealed, and cookies are ignored.
       const lan=url.pathname.startsWith('/api/')&&peerPath(req)==='lan';
+      if(lan&&!remoteSettings().lan) {
+        // Turned off in /remote-control settings: the page still loads and explains, nothing else answers.
+        if(url.pathname==='/api/bootstrap'&&req.method==='GET'){
+          const tailscaleUrl=options.tailscale?origins.advertised().find(o=>{try{return isTailscaleAddress(new URL(o).hostname)||new URL(o).hostname.endsWith('.ts.net');}catch{return false;}}):undefined;
+          json(res,200,{product:'Pi Remote Control',version:'0.1.0',protocol:{major:1,minor:0},paired:false,lanDisabled:true,sealRequired:true,now:Date.now(),...(tailscaleUrl?{tailscaleUrl}:{})});return;
+        }
+        json(res,403,{error:'lan_disabled'});return;
+      }
       let sealed:SealContext|undefined;
       if(lan) {
         try {
@@ -335,7 +382,7 @@ export async function startServer(options: ServerOptions) {
         // Unsealed: only enough for the page to know it must pair over Wi-Fi (or switch to Tailscale).
         const d=sealed?sealedDevice():undefined;
         const tailscaleUrl=!d&&options.tailscale?origins.advertised().find(o=>{try{return isTailscaleAddress(new URL(o).hostname)||new URL(o).hostname.endsWith('.ts.net');}catch{return false;}}):undefined;
-        json(res,200,{product:'Pi Remote Control',version:'0.1.0',protocol:{major:1,minor:0},paired:!!d,clientId:d?.clientId,owner:d?.owner,hostId:d?store.get('hostId'):undefined,sealRequired:true,now:Date.now(),...(tailscaleUrl?{tailscaleUrl}:{})});return;
+        json(res,200,{product:'Pi Remote Control',version:'0.1.0',protocol:{major:1,minor:0},paired:!!d,clientId:d?.clientId,owner:d?.owner,hostId:d?store.get('hostId'):undefined,sealRequired:true,now:Date.now(),...(d?{uploads:remoteSettings().uploads}:{}),...(tailscaleUrl?{tailscaleUrl}:{})});return;
       }
       if(url.pathname==='/api/pair'&&req.method==='POST'&&lan) {
         rate(req,10,'pair');
@@ -350,7 +397,7 @@ export async function startServer(options: ServerOptions) {
         let via:string|undefined,blocked=false;
         if(!d) {
           // Login with Tailscale: the owner's own tailnet devices need no QR.
-          const identity=await ownerDevice(options.tailscale,peerOf(req));
+          const identity=remoteSettings().tailscaleLogin?await ownerDevice(options.tailscale,peerOf(req)):undefined;
           if(identity) {
             rate(req,30,'tailscale-login');
             try{const login=core.tailscaleLogin(identity);res.setHeader('Set-Cookie',cookieValue(login.secret,Math.floor((login.expiresAt-Date.now())/1000),secure));d=core.authenticate(login.secret);via='tailscale';}
@@ -358,7 +405,7 @@ export async function startServer(options: ServerOptions) {
           }
         }
         const tailscaleUrl=!d&&options.tailscale&&!isTailscaleAddress(peerAddress(peerOf(req)))?origins.advertised().find(o=>{try{return isTailscaleAddress(new URL(o).hostname)||new URL(o).hostname.endsWith('.ts.net');}catch{return false;}}):undefined;
-        json(res,200,{product:'Pi Remote Control',version:'0.1.0',protocol:{major:1,minor:0},paired:!!d,clientId:d?.clientId,owner:d?.owner,hostId:store.get('hostId'),...(via?{via}:{}),...(blocked?{tailscaleBlocked:true}:{}),...(tailscaleUrl?{tailscaleUrl}:{})});return;
+        json(res,200,{product:'Pi Remote Control',version:'0.1.0',protocol:{major:1,minor:0},paired:!!d,clientId:d?.clientId,owner:d?.owner,hostId:store.get('hostId'),...(d?{uploads:remoteSettings().uploads}:{}),...(via?{via}:{}),...(blocked?{tailscaleBlocked:true}:{}),...(tailscaleUrl?{tailscaleUrl}:{})});return;
       }
       if(url.pathname==='/api/pair'&&req.method==='POST'){
         rate(req,10,'pair');const b=object(await body(req));
@@ -386,14 +433,28 @@ export async function startServer(options: ServerOptions) {
         if(sealed)sealedResponses.delete(res); // stream events are sealed one by one instead
         stream(req,res,device,sessionId,sealed);return;
       }
-      const sessionMatch=/^\/api\/sessions\/([^/]+)(?:\/(lease|commands))?$/.exec(url.pathname);
+      const sessionMatch=/^\/api\/sessions\/([^/]+)(?:\/(lease|commands|uploads))?$/.exec(url.pathname);
       if(sessionMatch){
         const id=decodeURIComponent(sessionMatch[1]!),action=sessionMatch[2];
         if(!action&&req.method==='GET'){json(res,200,core.snapshot(device,id));return;}
         if(action==='lease'&&req.method==='POST'){const b=object(await body(req));json(res,200,core.acquire(device,id,b.takeover===true));return;}
         if(action==='lease'&&req.method==='DELETE'){core.release(device,id);json(res,200,{status:'released'});return;}
         if(action==='commands'&&req.method==='POST'){const b=object(await body(req));assert(b.sessionId===id,'target_mismatch');json(res,200,await core.command(device,b));return;}
+        if(action==='uploads'&&req.method==='POST'){
+          // Only devices that may send messages to this session may upload files for it.
+          core.permit(device,id,true);assert(core.sessions.has(id),'session_not_found',404);
+          assert(remoteSettings().uploads,'uploads_disabled',403);
+          const b=object(await body(req));json(res,200,await uploads.create(device.clientId,{name:b.name,size:b.size,type:b.type}));return;
+        }
       }
+      const uploadMatch=/^\/api\/uploads\/([A-Za-z0-9_-]{16})$/.exec(url.pathname);
+      if(uploadMatch&&req.method==='POST'){
+        core.checkDevice(device);
+        const b=object(await body(req,UPLOAD_BODY));
+        assert(typeof b.data==='string'&&b.data.length%4===0&&/^[A-Za-z0-9+/]*={0,2}$/.test(b.data),'upload_chunk_invalid');
+        json(res,200,await uploads.append(device.clientId,uploadMatch[1],b.offset,Buffer.from(b.data,'base64')));return;
+      }
+      if(uploadMatch&&req.method==='DELETE'){core.checkDevice(device);await uploads.cancel(device.clientId,uploadMatch[1]);json(res,200,{status:'deleted'});return;}
       if(url.pathname==='/api/events'&&req.method==='GET'){
         const cursor=Number(url.searchParams.get('cursor')??0);assert(Number.isSafeInteger(cursor)&&cursor>=0,'invalid_cursor');json(res,200,core.replay(device,cursor));return;
       }
@@ -433,7 +494,7 @@ export async function startServer(options: ServerOptions) {
     await new Promise<void>((ok,fail)=>{ipc.once('error',fail);ipc.listen(socketPath,()=>{ipc.removeListener('error',fail);ok();});});await chmod(socketPath,0o600);
     await new Promise<void>((ok,fail)=>{http.once('error',fail);http.listen(port,host,()=>{http.removeListener('error',fail);ok();});});
   }catch(error){for(const s of sockets)s.destroy();ipc.close();store.close();throw error;}
-  const retention=setInterval(()=>{try{store.prune();}catch{/* mutations fail through durable write path */}},60_000);retention.unref();
+  const retention=setInterval(()=>{try{store.prune();}catch{/* mutations fail through durable write path */}void uploads.prune().catch(()=>{});},60_000);retention.unref();
   let closed=false;
   return {core,store,http,ipc,url:origins.primary(),urls:origins.advertised(),bindHost:host,socketPath,async close(){
     if(closed)return;closed=true;shuttingDown=true;clearInterval(retention);background.close();

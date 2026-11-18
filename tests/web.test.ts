@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 // The browser helper is deliberately shared unchanged with the app.
 // @ts-ignore -- buildless browser JavaScript has no emitted declaration file.
-import { contextKey, draftKey, createCommandId, isConfirmed, messageParts, hasCapability, expiresAtMs, parseMarkdown, parseInline, toolSummary, mergeStreamText, resultText, matchCommands } from '../web/helpers.js';
+import { contextKey, draftKey, createCommandId, isConfirmed, messageParts, hasCapability, expiresAtMs, parseMarkdown, parseInline, toolSummary, mergeStreamText, resultText, matchCommands, splitAttachments, ATTACHMENT_HEADING, LEGACY_ATTACHMENT_HEADING } from '../web/helpers.js';
 
 test('browser distinguishes transport dispatch from Pi acceptance', () => {
   for (const status of ['received', 'dispatching', 'dispatched_unconfirmed', 'indeterminate', 'failed', 'rejected']) assert.equal(isConfirmed(status), false, status);
@@ -75,12 +75,12 @@ test('markdown parser yields plain data and only http(s) links', () => {
   assert.deepEqual(parseMarkdown('```\nbelum ditutup'), [{ type: 'code', lang: '', text: 'belum ditutup' }], 'an unterminated fence while streaming still renders');
 });
 
-test('tool rows summarise the call the way Claude Code does', () => {
+test('tool rows summarise the call like a terminal coding assistant does', () => {
   assert.deepEqual(toolSummary('bash', { command: 'npm   test\n--watch' }), { label: 'Bash', detail: 'npm test --watch' });
   assert.deepEqual(toolSummary('read', { path: 'src/app.ts', offset: 10 }), { label: 'Read', detail: 'src/app.ts' });
   assert.deepEqual(toolSummary('grep', { pattern: 'TODO', path: 'src' }), { label: 'Grep', detail: 'TODO · src' });
   const long = toolSummary('custom_tool', { query: 'x'.repeat(300) }).detail; assert.ok(long.length <= 120 && long.endsWith('…'));
-  assert.equal(resultText({ content: [{ type: 'text', text: 'ok' }, { type: 'image', data: 'AAAA' }] }), 'ok\n[gambar]');
+  assert.equal(resultText({ content: [{ type: 'text', text: 'ok' }, { type: 'image', data: 'AAAA' }] }), 'ok\n[image]');
 });
 
 test('streamed characters extend the snapshot without flicker and yield to a newer snapshot', () => {
@@ -96,4 +96,15 @@ test('slash palette ranks prefix matches first and also searches descriptions', 
   assert.deepEqual(matchCommands(commands, 'com').map((c: any) => c.name), ['compact', 'skill:commit']);
   assert.deepEqual(matchCommands(commands, 'konteks').map((c: any) => c.name), ['compact']);
   assert.deepEqual(matchCommands(commands, 'zzz'), []);
+});
+
+test('attachment lists are recognised under the current and the legacy heading', () => {
+  const list = '- /home/me/.pi/uploads/a/shot.png (image/png, 16 B)';
+  for (const heading of [ATTACHMENT_HEADING, LEGACY_ATTACHMENT_HEADING]) {
+    assert.deepEqual(splitAttachments(`fix this\n\n${heading}\n${list}\n[image]`), { text: 'fix this', files: [{ path: '/home/me/.pi/uploads/a/shot.png', name: 'shot.png', type: 'image/png', size: '16 B' }] }, heading);
+  }
+  // A typed heading earlier in the message does not hide the real list after it.
+  const quoted = `${ATTACHMENT_HEADING} is what I see\n\n${LEGACY_ATTACHMENT_HEADING}\n${list}`;
+  assert.equal(splitAttachments(quoted).text, `${ATTACHMENT_HEADING} is what I see`);
+  assert.equal(splitAttachments(quoted).files.length, 1);
 });

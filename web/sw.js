@@ -1,4 +1,4 @@
-const CACHE = 'pi-remote-shell-v3';
+const CACHE = 'pi-remote-shell-v5';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/helpers.js', '/seal.js', '/vendor/noble/chacha.js', '/vendor/noble/_arx.js', '/vendor/noble/_poly1305.js', '/vendor/noble/utils.js', '/manifest.webmanifest', '/icon.svg'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

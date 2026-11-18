@@ -1,15 +1,17 @@
-import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, workflowPlanExample, matchCommands } from './helpers.js';
+import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, workflowPlanExample, matchCommands, splitAttachments, formatBytes, fileBadge, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } from './helpers.js';
 import { SEAL_CONTENT_TYPE, sealRequest, openResponse, sealStream, openEvent } from './seal.js';
 
 const $ = id => document.getElementById(id);
 const desktop = window.matchMedia('(pointer: fine)').matches;
-const VERBS = ['Bekerja', 'Berpikir', 'Menelusuri', 'Menyusun', 'Meracik', 'Menimbang'];
+const OFFLINE_GRACE_MS = 15000;
+const VERBS = ['Working', 'Thinking', 'Exploring', 'Composing', 'Brewing', 'Pondering'];
 const state = {
   clientId: null, owner: false,
   sessions: [], sessionId: null, session: null, lease: null,
-  live: new Map(), open: new Set(), nodes: new Map(), pending: [], notes: [], slash: { items: [], index: 0, open: false }, pickerChoices: [],
+  live: new Map(), open: new Set(), nodes: new Map(), pending: [], notes: [], slash: { items: [], index: 0, open: false }, pickerChoices: [], attachments: [],
   stream: null, streamFailures: 0, online: null, mode: 'steer', sending: false,
   workingSince: 0, stick: true, renderQueued: false, pinnedEnded: false, sessionsTimer: null, tickTimer: null, retryTimer: null,
+  offlineSince: new Map(), settleTimer: null,
 };
 
 /* ---------- small utilities ---------- */
@@ -73,23 +75,28 @@ async function api(path, options = {}, creds = sealCreds(), retried = false) {
 }
 
 const ERRORS = {
-  invalid_pairing: 'Tautan sudah dipakai atau kedaluwarsa. Jalankan /remote-control lagi untuk QR baru.',
-  session_unavailable: 'Sesi Pi untuk tautan ini sudah tidak aktif. Jalankan /remote-control lagi.',
-  unauthenticated: 'Perangkat ini belum terhubung.', device_revoked: 'Akses perangkat ini sudah dicabut.',
-  session_offline: 'Sesi Pi sedang offline.', session_busy: 'Pi sedang bekerja.', queue_full: 'Terlalu banyak pesan menunggu. Tunggu sebentar.',
-  rate_limited: 'Terlalu banyak permintaan. Coba lagi sebentar lagi.', prompt_too_large: 'Pesan terlalu panjang (maks. 64 KiB).',
-  slash_commands_disabled: 'Perintah slash dikirim sebagai perintah, bukan pesan.', invalid_command: 'Format perintah tidak valid.', workspace_not_approved: 'Daemon belum dijalankan dengan --workspace.',
-  forbidden: 'Perangkat ini tidak punya izin untuk itu.',
-  folder_outside_home: 'Folder harus berada di dalam home directory.', folder_not_found: 'Folder tidak ditemukan.', invalid_folder: 'Tulis path folder proyek.', background_start_failed: 'Gagal memulai sesi background.', background_not_found: 'Sesi background tidak ditemukan.',
-  tailscale_blocked: 'Akses perangkat ini pernah dicabut, jadi tidak masuk otomatis. Jalankan /remote-control pair di terminal Pi lalu scan QR-nya.',
-  encryption_required: 'Di Wi-Fi semua data dienkripsi. Jalankan /remote-control pair wifi di terminal Pi lalu scan QR-nya.',
-  seal_invalid: 'Kunci Wi-Fi perangkat ini tidak berlaku lagi. Jalankan /remote-control pair wifi untuk QR baru.',
-  seal_replay: 'Permintaan ditolak karena terdeteksi dikirim ulang. Coba lagi.', no_lan_address: 'Daemon tidak punya alamat Wi-Fi.',
+  invalid_pairing: 'This link was already used or has expired. Run /remote-control in the Pi terminal for a new QR.',
+  session_unavailable: 'The Pi session for this link is no longer active. Run /remote-control in the Pi terminal again.',
+  unauthenticated: 'This device isn’t paired. Run /remote-control pair in the Pi terminal, then scan the QR.', device_revoked: 'Access for this device was revoked. Run /remote-control pair in the Pi terminal to pair it again.',
+  session_offline: 'The Pi session is offline.', session_busy: 'Pi is busy. Try again in a moment.', queue_full: 'Too many messages are waiting. Wait a moment, then try again.',
+  rate_limited: 'Too many requests. Try again in a moment.', prompt_too_large: 'Message is too long (max 64 KiB). Shorten it or attach it as a file.',
+  slash_commands_disabled: 'Slash commands are sent as commands, not messages.', invalid_command: 'Invalid command format.', workspace_not_approved: 'The daemon wasn’t started with --workspace. Restart it with --workspace to run workflows.',
+  forbidden: 'This device doesn’t have permission to do that.',
+  folder_outside_home: 'The folder must be inside your home directory.', folder_not_found: 'Folder not found. Check the path.', invalid_folder: 'Enter the path of a project folder.', background_start_failed: 'Couldn’t start the background session.', background_not_found: 'Background session not found.',
+  tailscale_blocked: 'Access for this device was revoked, so it can’t sign in automatically. Run /remote-control pair in the Pi terminal, then scan the QR.',
+  encryption_required: 'On Wi-Fi, all data is encrypted. Run /remote-control pair wifi in the Pi terminal, then scan the QR.',
+  seal_invalid: 'This device’s Wi-Fi key is no longer valid. Run /remote-control pair wifi in the Pi terminal, then scan the new QR.',
+  seal_replay: 'Request rejected because it looked like a replay. Try again.', no_lan_address: 'The daemon has no Wi-Fi address. Connect the computer to Wi-Fi, or use Tailscale.',
+  upload_too_large: 'File is too large (max 25 MB).', upload_empty: 'File is empty.', upload_quota: 'File storage on the computer is full (1 GB). Try again later.',
+  too_many_uploads: 'Too many unfinished uploads. Wait for them to finish, then try again.', upload_not_found: 'The file is no longer on the computer. Upload it again.', upload_incomplete: 'Upload isn’t finished yet. Wait for it, then send again.',
+  lan_disabled: 'Wi-Fi access is turned off on the computer. Open the Tailscale address, or turn it back on with /remote-control settings in Pi.',
+  uploads_disabled: 'Files from the phone are turned off on the computer (/remote-control settings in Pi).',
+  too_many_attachments: 'Up to 10 files per message.', attachments_unsupported: 'Pi in this session is running an older version of the extension. Run /reload in that Pi terminal.', frame_too_large: 'Data is too large.',
 };
 function friendlyError(code, status) {
   if (typeof code === 'string' && ERRORS[code]) return ERRORS[code];
   if (typeof code === 'string') return code.replaceAll('_', ' ');
-  return `Permintaan gagal (${status}).`;
+  return `Request failed (${status}).`;
 }
 
 /* ---------- pairing ---------- */
@@ -163,10 +170,10 @@ async function boot() {
   try {
     let info = await api('/api/bootstrap').catch(error => { if (error.status === 401 && sealCreds()) { setSealCreds(null); return api('/api/bootstrap', {}, null); } throw error; });
     if (!info.paired && info.sealRequired && sealCreds()) { setSealCreds(null); info = await api('/api/bootstrap', {}, null); }
-    if (!info.paired) { showPair(info.tailscaleBlocked ? ERRORS.tailscale_blocked : info.sealRequired ? ERRORS.encryption_required : undefined, info.tailscaleUrl); return; }
-    if (info.sealRequired) toast('Terhubung lewat Wi-Fi · semua data terenkripsi.');
-    state.clientId = info.clientId; state.owner = info.owner === true;
-    if (info.via === 'tailscale') toast('Masuk otomatis lewat akun Tailscale Anda.');
+    if (!info.paired) { showPair(info.lanDisabled ? ERRORS.lan_disabled : info.tailscaleBlocked ? ERRORS.tailscale_blocked : info.sealRequired ? ERRORS.encryption_required : undefined, info.tailscaleUrl); return; }
+    if (info.sealRequired) toast('Connected over Wi-Fi · all data is encrypted.');
+    state.clientId = info.clientId; state.owner = info.owner === true; state.uploads = info.uploads !== false;
+    if (info.via === 'tailscale') toast('Signed in automatically with your Tailscale account.');
     banner('');
     $('pair-screen').hidden = true; $('chat-screen').hidden = false;
     document.querySelectorAll('[data-owner]').forEach(node => { node.hidden = !state.owner; });
@@ -177,7 +184,7 @@ async function boot() {
   } catch (error) {
     if (error.status === 401) { showPair(); return; }
     $('pair-screen').hidden = true; $('chat-screen').hidden = false;
-    banner('Host Pi belum bisa dihubungi. Periksa jaringan (Tailscale/LAN). Mencoba lagi…', 'error');
+    banner('Can’t reach the Pi host. Check your network (Tailscale/LAN). Retrying…', 'error');
     clearTimeout(state.retryTimer); state.retryTimer = setTimeout(() => void boot(), 5000);
   }
 }
@@ -193,12 +200,20 @@ async function refreshSessions(choose) {
   state.sessions = [...live, ...ended];
   renderSessionList();
   const current = state.sessions.find(s => s.sessionId === state.sessionId);
-  // Pi was restarted or the session was replaced: move to the live one instead of showing a dead chat.
-  const stale = current && current.connection === 'offline' && live.length > 0 && !state.pinnedEnded;
+  for (const s of live) state.offlineSince.delete(s.sessionId);
+  if (current?.connection === 'offline' && !state.offlineSince.has(current.sessionId)) state.offlineSince.set(current.sessionId, Date.now());
+  // Detach and attach take a session offline for a few seconds while it moves between the terminal
+  // and the background (the daemon flags that as `moving`), and Pi or the daemon may just restart.
+  // Stay on the session meanwhile instead of jumping to whichever other session is live.
+  const settling = current?.connection === 'offline' && !state.pinnedEnded && (current.moving || Date.now() - state.offlineSince.get(current.sessionId) < OFFLINE_GRACE_MS);
+  clearTimeout(state.settleTimer);
+  if (settling) state.settleTimer = setTimeout(() => void refreshSessions(false).catch(() => {}), 3000);
+  // Pi was closed or the session was replaced: move to the live one instead of showing a dead chat.
+  const stale = current && current.connection === 'offline' && live.length > 0 && !state.pinnedEnded && !settling;
   if (choose || !current || stale) {
     const remembered = storageGet('pi-remote:session');
-    const pick = live.find(s => s.sessionId === remembered) ?? live[0] ?? (current ? null : ended[0]);
-    if (pick && pick.sessionId !== state.sessionId) { selectSession(pick.sessionId); if (stale) toast(`Pindah ke sesi aktif: ${pick.title || basename(pick.cwd) || 'Sesi Pi'}`); }
+    const pick = (settling ? current : null) ?? live.find(s => s.sessionId === remembered) ?? all.find(s => s.sessionId === remembered && s.moving) ?? live[0] ?? (current ? null : ended[0]);
+    if (pick && pick.sessionId !== state.sessionId) { selectSession(pick.sessionId); if (stale) toast(`Switched to active session: ${pick.title || basename(pick.cwd) || 'Pi session'}`); }
     else if (pick && !state.stream) openStream();
     if (!pick && !current) showEmpty();
   }
@@ -207,7 +222,7 @@ async function refreshSessions(choose) {
 function showEmpty() {
   closeStream(); state.sessionId = null; state.session = null;
   state.nodes.clear(); state.live.clear();
-  $('messages').replaceChildren(el('p', 'empty', 'Belum ada sesi Pi yang terbuka. Jalankan /remote-control di terminal Pi (atau /remote-control auto sekali saja), lalu sesi muncul di sini otomatis.'));
+  $('messages').replaceChildren(el('p', 'empty', 'No Pi sessions are open. Run /remote-control in the Pi terminal (or /remote-control auto once, to connect every new Pi), and sessions show up here automatically.'));
   updateChrome();
 }
 
@@ -217,7 +232,7 @@ function selectSession(sessionId) {
   state.sessionId = sessionId; state.session = null; state.lease = null; state.pending = []; state.online = null;
   state.nodes.clear(); state.live.clear(); state.open.clear(); state.notes = []; state.stick = true;
   storageSet('pi-remote:session', sessionId);
-  $('messages').replaceChildren(el('p', 'empty', 'Memuat sesi…'));
+  $('messages').replaceChildren(el('p', 'empty', 'Loading session…'));
   $('input').value = storageGet(draftKey(location.origin, sessionId)); autosize();
   renderSessionList(); renderPending(); updateChrome();
   openStream();
@@ -226,13 +241,15 @@ function selectSession(sessionId) {
 function renderSessionList() {
   const list = $('sessions');
   list.replaceChildren();
-  if (!state.sessions.length) list.append(el('p', 'dim', 'Belum ada sesi aktif.'));
+  if (!state.sessions.length) list.append(el('p', 'dim', 'No active sessions.'));
   for (const session of state.sessions) {
     const button = el('button', `session-item ${session.sessionId === state.sessionId ? 'selected' : ''} ${session.connection === 'offline' ? 'ended' : ''}`);
     button.type = 'button';
     const dot = el('span', `dot ${session.connection === 'offline' ? '' : session.workState === 'running' ? 'busy' : 'live'}`);
     const text = el('span');
-    text.append(el('strong', '', session.title || basename(session.cwd) || 'Sesi Pi'), el('small', '', [basename(session.cwd), session.model?.id, session.background ? 'background' : '', session.connection === 'offline' ? 'selesai' : ''].filter(Boolean).join(' · ')));
+    text.append(el('strong', '', session.title || basename(session.cwd) || 'Pi session'));
+    if (session.preview) text.append(el('small', 'preview', session.preview));
+    text.append(el('small', '', [basename(session.cwd), session.model?.id, session.background ? 'background' : '', session.connection === 'offline' ? (session.moving ? 'moving' : 'ended') : ''].filter(Boolean).join(' · ')));
     button.append(dot, text);
     button.addEventListener('click', () => { closeDrawer(); state.pinnedEnded = session.connection === 'offline'; if (session.sessionId !== state.sessionId) selectSession(session.sessionId); });
     list.append(button);
@@ -283,7 +300,7 @@ function closeStream() { if (state.stream) { state.stream.close(); state.stream 
 function setOnline(online) {
   if (state.online === online) return;
   state.online = online;
-  banner(online || !state.sessionId ? '' : 'Koneksi ke host terputus. Menyambung ulang… Pesan yang belum terkirim tetap di kotak input.');
+  banner(online || !state.sessionId ? '' : 'Lost connection to the host. Reconnecting… Unsent messages stay in the input box.');
   updateChrome();
 }
 
@@ -330,7 +347,7 @@ function contentText(message) {
   const content = message?.content;
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
-  return content.map(p => p?.type === 'text' ? p.text : p?.type === 'image' ? '[gambar]' : '').filter(Boolean).join('\n');
+  return content.map(p => p?.type === 'text' ? p.text : p?.type === 'image' ? '[image]' : '').filter(Boolean).join('\n');
 }
 
 function transcriptItems() {
@@ -341,7 +358,7 @@ function transcriptItems() {
   const items = [];
   for (const m of messages) {
     const ts = String(m.timestamp ?? '');
-    if (m.role === 'user') { items.push({ type: 'user', key: `u:${ts}:${items.length}`, text: contentText(m) }); continue; }
+    if (m.role === 'user') { const { text, files } = splitAttachments(contentText(m)); items.push({ type: 'user', key: `u:${ts}:${items.length}`, text, files }); continue; }
     if (m.role === 'assistant') {
       const parts = Array.isArray(m.content) ? m.content : typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : [];
       parts.forEach((part, i) => {
@@ -358,7 +375,7 @@ function transcriptItems() {
         }
       });
       if (m.streaming) addLiveParts(items, ts, parts.length);
-      if (m.stopReason === 'aborted') items.push({ type: 'error', key: `e:${ts}`, text: 'Dihentikan.' });
+      if (m.stopReason === 'aborted') items.push({ type: 'error', key: `e:${ts}`, text: 'Stopped.' });
       else if (m.errorMessage) items.push({ type: 'error', key: `e:${ts}`, text: m.errorMessage });
       continue;
     }
@@ -370,14 +387,14 @@ function transcriptItems() {
       items.push({ type: 'tool', key: `b:${ts}`, name: 'bash', args: { command: m.command }, output: String(m.output ?? ''), error: typeof m.exitCode === 'number' && m.exitCode !== 0, running: false });
       continue;
     }
-    if (m.role === 'compactionSummary') { items.push({ type: 'note', key: `n:${ts}`, text: '✻ Konteks dipadatkan (compaction).' }); continue; }
+    if (m.role === 'compactionSummary') { items.push({ type: 'note', key: `n:${ts}`, text: '✻ Context compacted.' }); continue; }
     const text = m.summary ?? contentText(m);
     if (text) items.push({ type: 'note', key: `n:${ts}:${items.length}`, text: String(text).slice(0, 2000) });
   }
   // Characters of a message that started after the last snapshot.
   const known = new Set(messages.map(m => String(m.timestamp)));
   for (const ts of new Set([...state.live.keys()].map(k => k.split(':')[0]).filter(ts => !known.has(ts)))) addLiveParts(items, ts, 0);
-  // Output of slash commands run from this device (local only, like Claude Code's command output).
+  // Output of slash commands run from this device (local only, like a terminal's command output).
   for (const note of state.notes) items.push({ type: 'notice', key: note.key, title: note.title, text: note.text });
   return items;
 }
@@ -392,7 +409,7 @@ function render() {
   const transcript = $('transcript');
   if (!state.session) return;
   const items = transcriptItems();
-  if (!items.length) { container.replaceChildren(el('p', 'empty', 'Sesi masih kosong. Kirim pesan pertama Anda.')); state.nodes.clear(); return; }
+  if (!items.length) { container.replaceChildren(el('p', 'empty', 'This session is empty. Send your first message.')); state.nodes.clear(); return; }
   const next = items.map(item => {
     const signature = JSON.stringify(item) + (state.open.has(item.key) ? '+' : '');
     const cached = state.nodes.get(item.key);
@@ -408,7 +425,15 @@ function render() {
 }
 
 function build(item) {
-  if (item.type === 'user') return el('div', 'msg-user', item.text);
+  if (item.type === 'user') {
+    const node = el('div', 'msg-user', item.text);
+    if (item.files?.length) {
+      const row = el('div', 'file-row');
+      for (const f of item.files) { const chip = el('span', 'file-chip'); chip.title = f.path; chip.append(el('b', '', f.name), document.createTextNode(f.size)); row.append(chip); }
+      node.append(row);
+    }
+    return node;
+  }
   if (item.type === 'text') {
     const node = el('div', 'msg-assistant');
     const body = el('div', 'md');
@@ -426,7 +451,7 @@ function build(item) {
     const node = el('details', 'thinking');
     node.open = state.open.has(item.key);
     node.addEventListener('toggle', () => { if (node.open) state.open.add(item.key); else state.open.delete(item.key); });
-    node.append(el('summary', '', item.streaming ? '✻ Berpikir…' : `✻ Berpikir (${item.text.trim().split(/\s+/).length} kata)`), el('div', 'think-body', item.text));
+    node.append(el('summary', '', item.streaming ? '✻ Thinking…' : `✻ Thought (${item.text.trim().split(/\s+/).length} words)`), el('div', 'think-body', item.text));
     return node;
   }
   if (item.type === 'tool') return buildTool(item);
@@ -448,11 +473,11 @@ function buildTool(item) {
   const out = el('div', 'tool-out');
   const diff = editDiff(item.name, item.args);
   if (diff.length) for (const line of diff.slice(0, open ? 400 : 6)) out.append(el('span', line.kind, `${line.text}\n`));
-  else if (item.running && !item.output) out.textContent = 'Berjalan…';
-  else out.textContent = (item.output || '(tanpa output)').slice(0, open ? 20000 : 600);
+  else if (item.running && !item.output) out.textContent = 'Running…';
+  else out.textContent = (item.output || '(no output)').slice(0, open ? 20000 : 600);
   node.append(out);
   const lines = diff.length || (item.output || '').split('\n').length;
-  if (!open && lines > 3) node.append(el('div', 'more', `… +${lines - 3} baris · ketuk untuk buka`));
+  if (!open && lines > 3) node.append(el('div', 'more', `… +${lines - 3} lines · tap to expand`));
   return node;
 }
 
@@ -497,37 +522,44 @@ function isLive() { return state.online && !!state.session && state.session.conn
 
 function updateChrome() {
   const session = state.session;
-  $('title').textContent = session ? (session.title || basename(session.cwd) || 'Sesi Pi') : 'Pi';
-  const usage = session?.usage && typeof session.usage.percent === 'number' ? `${Math.round(session.usage.percent)}% konteks` : '';
+  $('title').textContent = session ? (session.title || basename(session.cwd) || 'Pi session') : 'Pi';
+  const usage = session?.usage && typeof session.usage.percent === 'number' ? `${Math.round(session.usage.percent)}% context` : '';
   $('subtitle').textContent = session ? [session.background ? `background (${session.background.backend})` : '', basename(session.cwd), session.model?.id, session.thinkingLevel && session.thinkingLevel !== 'off' ? session.thinkingLevel : '', usage].filter(Boolean).join(' · ') : '';
   const status = $('status');
-  let text = 'Siap', tone = 'live';
-  if (!state.sessionId) { text = 'Tidak ada sesi'; tone = ''; }
-  else if (state.online === false) { text = 'Menyambung ulang'; tone = 'off'; }
-  else if (!session) { text = 'Memuat'; tone = ''; }
-  else if (session.connection === 'offline' || session.workState === 'ended') { text = 'Selesai'; tone = ''; }
-  else if (isRunning()) { text = 'Bekerja'; tone = 'busy'; }
+  let text = 'Ready', tone = 'live';
+  if (!state.sessionId) { text = 'No session'; tone = ''; }
+  else if (state.online === false) { text = 'Reconnecting'; tone = 'off'; }
+  else if (!session) { text = 'Loading'; tone = ''; }
+  else if (session.connection === 'offline' && session.moving) { text = 'Moving'; tone = 'busy'; }
+  else if (session.connection === 'offline' || session.workState === 'ended') { text = 'Ended'; tone = ''; }
+  else if (isRunning()) { text = 'Working'; tone = 'busy'; }
   status.className = `status ${tone}`; $('status-text').textContent = text;
 
   const running = isRunning() && isLive();
   $('working').hidden = !running;
   $('stop').hidden = !running;
   $('mode-toggle').hidden = !running;
-  $('mode-toggle').textContent = state.mode === 'steer' ? 'Arahkan ⇄' : 'Setelah selesai ⇄';
-  $('mode-hint').textContent = !isLive() ? (session && (session.connection === 'offline' || session.workState === 'ended') ? 'Sesi ini sudah ditutup di terminal. Transkripnya tetap bisa dibaca.' : state.sessionId && session ? 'Sesi belum bisa menerima pesan.' : '') : running
-    ? (state.mode === 'steer' ? 'Dibaca Pi setelah langkah yang sedang berjalan selesai.' : 'Dikirim setelah Pi selesai bekerja.')
-    : desktop ? 'Enter untuk kirim · Shift+Enter baris baru · / untuk perintah' : 'Ketik / untuk perintah';
+  $('mode-toggle').textContent = state.mode === 'steer' ? 'Steer ⇄' : 'Queue ⇄';
+  $('mode-hint').textContent = !isLive() ? (session?.connection === 'offline' && session.moving ? 'This session is moving between the terminal and the background. It will be back in a moment.' : session && (session.connection === 'offline' || session.workState === 'ended') ? 'This session was closed in the terminal. You can still read the transcript.' : state.sessionId && session ? 'This session can’t receive messages yet.' : '') : running
+    ? (state.mode === 'steer' ? 'Pi reads this after its current step.' : 'Sent after Pi finishes.')
+    : desktop ? 'Enter to send · Shift+Enter for a new line · / for commands' : 'Type / for commands';
   updateWorking();
   updateSend();
 }
-function updateSend() { $('send').disabled = !isLive() || state.sending || !$('input').value.trim(); }
+function updateSend() {
+  const files = state.attachments;
+  $('send').disabled = !isLive() || state.sending || files.some(a => a.status !== 'done') || (!$('input').value.trim() && !files.length);
+  const canAttach = isLive() && state.uploads !== false && !!state.session?.capabilities?.includes('attachments');
+  $('attach').disabled = !canAttach;
+  $('attach').title = canAttach || !isLive() ? 'Attach files or photos' : state.uploads === false ? ERRORS.uploads_disabled : 'Run /reload in this session’s Pi terminal to send files';
+}
 
 function updateWorking() {
   if ($('working').hidden) return;
   const ws = state.session?.workState;
   const seconds = state.workingSince ? Math.floor((Date.now() - state.workingSince) / 1000) : 0;
-  $('working-text').textContent = ws === 'stopping' ? 'Menghentikan…' : ws === 'waiting_local_input' ? 'Menunggu jawaban di terminal…' : `${VERBS[Math.floor(seconds / 6) % VERBS.length]}…`;
-  $('working-time').textContent = `(${seconds}s${desktop ? ' · esc untuk berhenti' : ''})`;
+  $('working-text').textContent = ws === 'stopping' ? 'Stopping…' : ws === 'waiting_local_input' ? 'Waiting for an answer in the terminal…' : `${VERBS[Math.floor(seconds / 6) % VERBS.length]}…`;
+  $('working-time').textContent = `(${seconds}s${desktop ? ' · esc to stop' : ''})`;
 }
 
 function autosize() {
@@ -538,10 +570,10 @@ function autosize() {
 function saveDraft() { if (state.sessionId) storageSet(draftKey(location.origin, state.sessionId), $('input').value); }
 
 function renderPending() {
-  $('pending').replaceChildren(...state.pending.map(p => el('div', 'pending-item', `${p.kind === 'follow_up' ? '⏳ setelah selesai' : p.kind === 'steer' ? '↪ arahan' : '› terkirim'} · ${p.text.replace(/\s+/g, ' ')}`)));
+  $('pending').replaceChildren(...state.pending.map(p => el('div', 'pending-item', `${p.kind === 'follow_up' ? '⏳ queued' : p.kind === 'steer' ? '↪ steer' : '› sent'} · ${[p.text.replace(/\s+/g, ' ').trim(), p.files ? `${p.files} ${p.files === 1 ? 'file' : 'files'}` : ''].filter(Boolean).join(' + ')}`)));
 }
 function prunePending() {
-  const users = (state.session?.messages ?? []).filter(m => m.role === 'user').map(m => ({ text: contentText(m).trim(), ts: Number(m.timestamp) || 0 }));
+  const users = (state.session?.messages ?? []).filter(m => m.role === 'user').map(m => ({ text: splitAttachments(contentText(m)).text.trim(), ts: Number(m.timestamp) || 0 }));
   const idle = !isRunning();
   state.pending = state.pending.filter(p => !users.some(u => u.text === p.text.trim() && u.ts >= p.at - 60_000) && !(idle && Date.now() - p.at > 4000));
   renderPending();
@@ -557,25 +589,25 @@ async function ensureLease(force = false) {
   return state.lease;
 }
 
-async function command(kind, text, attempt = 0) {
+async function command(kind, text, attempt = 0, attachments = undefined) {
   const session = state.session;
   const lease = await ensureLease(attempt > 0);
   const envelope = {
     commandId: createCommandId(), sessionId: session.sessionId, runtimeId: session.runtimeId, bindingEpoch: session.bindingEpoch,
-    branchId: session.branchId, leaseEpoch: lease.leaseEpoch, kind, payload: kind === 'abort' ? {} : { text }, expiresAt: Date.now() + 25000,
+    branchId: session.branchId, leaseEpoch: lease.leaseEpoch, kind, payload: kind === 'abort' ? {} : { text, ...(attachments ? { attachments } : {}) }, expiresAt: Date.now() + 25000,
   };
   try {
     const result = await api(`/api/sessions/${encodeURIComponent(session.sessionId)}/commands`, { method: 'POST', body: envelope });
     return { ...(result.command ?? result), kind };
   } catch (error) {
     // Pi started working between reading state and sending: deliver as guidance instead.
-    if (error.code === 'session_busy' && kind === 'prompt' && attempt < 2) return command(state.mode, text, attempt + 1);
+    if (error.code === 'session_busy' && kind === 'prompt' && attempt < 2) return command(state.mode, text, attempt + 1, attachments);
     // The lease or the session context moved (another device, /tree in the terminal): refresh once and retry.
     if (['lease_required', 'lease_stale', 'lease_held', 'stale_context', 'stale_binding', 'stale_runtime'].includes(error.code) && attempt < 1) {
       const fresh = await api(`/api/sessions/${encodeURIComponent(session.sessionId)}`);
       state.session = { ...fresh.session, messages: state.session?.messages ?? fresh.session.messages };
       state.lease = fresh.lease ?? null;
-      return command(kind, text, attempt + 1);
+      return command(kind, text, attempt + 1, attachments);
     }
     throw error;
   }
@@ -583,22 +615,123 @@ async function command(kind, text, attempt = 0) {
 
 async function send() {
   const text = $('input').value;
-  if (!text.trim() || !isLive() || state.sending) return;
+  const files = state.attachments;
+  if ((!text.trim() && !files.length) || !isLive() || state.sending) return;
+  if (files.some(a => a.status !== 'done')) { toast(files.some(a => a.status === 'error') ? 'A file failed to upload. Tap it to retry, or remove it.' : 'Wait until all files finish uploading.', 'error'); return; }
   closeSlash();
-  if (text.trim().startsWith('/')) { await runSlash(text.trim()); return; }
+  if (text.trim().startsWith('/')) {
+    if (files.length) { toast('Files can’t be sent with a slash command. Send the command first, or remove the /.', 'error'); return; }
+    await runSlash(text.trim()); return;
+  }
   const kind = isRunning() ? state.mode : 'prompt';
   state.sending = true; updateSend();
   try {
-    const result = await command(kind, text);
-    if (['rejected', 'stale_context', 'failed'].includes(result.status)) { toast(`Tidak terkirim: ${friendlyError(result.error)}`, 'error'); return; }
+    const result = await command(kind, text, 0, files.length ? files.map(a => a.uploadId) : undefined);
+    if (['rejected', 'stale_context', 'failed'].includes(result.status)) { toast(`Not sent: ${friendlyError(result.error)}`, 'error'); return; }
     $('input').value = ''; autosize(); saveDraft();
-    state.pending.push({ kind: result.kind, text, at: Date.now() }); renderPending();
+    clearAttachments();
+    state.pending.push({ kind: result.kind, text, files: files.length, at: Date.now() }); renderPending();
     state.stick = true; scheduleRender();
-    if (result.status === 'indeterminate') toast('Status pesan belum pasti. Periksa transkrip sebelum mengirim ulang.', 'error');
+    if (result.status === 'indeterminate') toast('Delivery couldn’t be confirmed. Check the transcript before sending again.', 'error');
   } catch (error) {
     if (error.status === 401) { void signedOut(error.message); return; }
     toast(error.message, 'error');
   } finally { state.sending = false; updateSend(); }
+}
+
+/* ---------- attachments ---------- */
+let attachSeq = 0, pumping = false;
+function addFiles(list) {
+  const files = [...(list ?? [])];
+  if (!files.length) return;
+  if (!isLive()) { toast('Select an active session first.', 'error'); return; }
+  if (state.uploads === false) { toast(ERRORS.uploads_disabled, 'error'); return; }
+  if (!state.session?.capabilities?.includes('attachments')) { toast(friendlyError('attachments_unsupported'), 'error'); return; }
+  for (const file of files) {
+    if (state.attachments.length >= UPLOAD_MAX_FILES) { toast(`Up to ${UPLOAD_MAX_FILES} files per message.`, 'error'); break; }
+    if (!file.size) { toast(`${file.name || 'File'} is empty.`, 'error'); continue; }
+    if (file.size > UPLOAD_MAX_BYTES) { toast(`${file.name} is too large (max 25 MB).`, 'error'); continue; }
+    const name = file.name || `pasted-${Date.now()}.${(file.type.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 5)}`;
+    state.attachments.push({ id: ++attachSeq, file, name, size: file.size, sent: 0, status: 'queued', preview: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : '' });
+  }
+  renderAttachments(); updateSend(); void pumpUploads();
+}
+async function pumpUploads() {
+  if (pumping) return;
+  pumping = true;
+  try { let item; while ((item = state.attachments.find(a => a.status === 'queued'))) await uploadOne(item); }
+  finally { pumping = false; }
+}
+function base64Of(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => { const url = String(reader.result); resolve(url.slice(url.indexOf(',') + 1)); };
+    reader.onerror = () => reject(reader.error ?? new Error('Couldn’t read the file.'));
+    reader.readAsDataURL(blob);
+  });
+}
+/** Chunked upload: each chunk is a normal API call, so it is sealed on Wi-Fi like everything else. */
+async function uploadOne(item) {
+  item.status = 'uploading'; item.sent = 0; item.error = ''; renderAttachments();
+  try {
+    const created = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/uploads`, { method: 'POST', body: { name: item.name, size: item.size, type: item.file.type } });
+    item.uploadId = created.uploadId;
+    for (let offset = 0; offset < item.size && !item.removed; offset += created.chunkSize) {
+      const data = await base64Of(item.file.slice(offset, offset + created.chunkSize));
+      if (item.removed) break;
+      const result = await api(`/api/uploads/${item.uploadId}`, { method: 'POST', body: { offset, data } });
+      item.sent = result.received;
+      if (result.done) item.status = 'done';
+      renderAttachments();
+    }
+    if (!item.removed && item.status !== 'done') throw new Error('Upload incomplete.');
+  } catch (error) {
+    if (item.removed) return;
+    item.status = 'error'; item.error = error.message; renderAttachments();
+    if (error.code === 'uploads_disabled') { state.uploads = false; updateSend(); toast(error.message, 'error'); }
+    if (error.status === 401) void signedOut(error.message);
+  } finally { updateSend(); }
+}
+function forgetUpload(item) {
+  if (item.uploadId) void api(`/api/uploads/${item.uploadId}`, { method: 'DELETE' }).catch(() => {});
+  item.uploadId = undefined;
+}
+function removeAttachment(item) {
+  item.removed = true;
+  state.attachments = state.attachments.filter(a => a !== item);
+  if (item.preview) URL.revokeObjectURL(item.preview);
+  forgetUpload(item);
+  renderAttachments(); updateSend();
+}
+function retryAttachment(item) {
+  if (item.status !== 'error') return;
+  forgetUpload(item);
+  item.status = 'queued'; renderAttachments(); updateSend(); void pumpUploads();
+}
+/** After sending: the files stay on the computer for Pi; only the composer forgets them. */
+function clearAttachments() {
+  for (const item of state.attachments) if (item.preview) URL.revokeObjectURL(item.preview);
+  state.attachments = []; renderAttachments();
+}
+function renderAttachments() {
+  const box = $('attachments');
+  box.hidden = !state.attachments.length;
+  box.replaceChildren(...state.attachments.map(item => {
+    const node = el('div', `attachment ${item.status}`);
+    let visual;
+    if (item.preview) { visual = el('img', 'thumb'); visual.src = item.preview; visual.alt = ''; }
+    else visual = el('span', 'badge', fileBadge(item.name));
+    const meta = item.status === 'error' ? 'Failed · tap to retry' : item.status === 'done' ? formatBytes(item.size)
+      : item.status === 'queued' ? 'Waiting…' : `${Math.floor((item.sent / item.size) * 100)}% · ${formatBytes(item.size)}`;
+    const text = el('span', 'att-text'); text.append(el('span', 'att-name', item.name), el('span', 'att-meta', meta));
+    if (item.status === 'error') { node.title = item.error; node.addEventListener('click', () => retryAttachment(item)); }
+    const remove = el('button', 'att-remove', '×'); remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${item.name}`);
+    remove.addEventListener('click', event => { event.stopPropagation(); removeAttachment(item); });
+    const bar = el('span', 'att-progress');
+    bar.style.width = item.status === 'uploading' ? `${(item.sent / item.size) * 100}%` : '0';
+    node.append(visual, text, remove, bar);
+    return node;
+  }));
 }
 
 async function stop() {
@@ -606,7 +739,7 @@ async function stop() {
   $('stop').disabled = true;
   try {
     await command('abort');
-    if (state.pending.length) toast('Pi dihentikan. Pesan yang masih antre dipindahkan ke editor terminal.');
+    if (state.pending.length) toast('Pi stopped. Queued messages were moved to the terminal editor.');
     state.pending = []; renderPending();
   } catch (error) { toast(error.message, 'error'); }
   finally { $('stop').disabled = false; }
@@ -658,7 +791,7 @@ function renderSlash() {
   const menu = $('slash-menu');
   menu.hidden = !state.slash.open;
   if (!state.slash.open) return;
-  if (!state.slash.items.length) { menu.replaceChildren(el('div', 'slash-empty', 'Tidak ada perintah yang cocok.')); return; }
+  if (!state.slash.items.length) { menu.replaceChildren(el('div', 'slash-empty', 'No matching commands.')); return; }
   menu.replaceChildren(...state.slash.items.map((cmd, i) => {
     const item = el('button', `slash-item${i === state.slash.index ? ' active' : ''}`);
     item.type = 'button'; item.setAttribute('role', 'option'); item.setAttribute('aria-selected', String(i === state.slash.index));
@@ -706,14 +839,14 @@ function renderPicker() {
     item.append(label, el('span', 'check', choice.current ? '✓' : ''));
     item.addEventListener('click', () => { closePicker(); void runSlash(choice.value, true); });
     return item;
-  }) : [el('p', 'dim', 'Tidak ada yang cocok.')]));
+  }) : [el('p', 'dim', 'No matches.')]));
 }
 
 /* ---------- drawer & panels ---------- */
 function openDrawer() { $('drawer').hidden = false; $('scrim').hidden = false; void refreshSessions(false).catch(() => {}); }
 function closeDrawer() { $('drawer').hidden = true; $('scrim').hidden = true; }
 
-const PANELS = { background: 'Sesi background', devices: 'Perangkat', settings: 'Model & pengaturan', workflows: 'Orchestrator' };
+const PANELS = { background: 'Background sessions', devices: 'Devices', settings: 'Models & settings', workflows: 'Orchestrator' };
 function openPanel(name) {
   closeDrawer();
   $('panel').hidden = false; $('panel-title').textContent = PANELS[name];
@@ -725,20 +858,20 @@ function openPanel(name) {
 async function loadDevices() {
   const data = await api('/api/devices').catch(error => { if (error.status === 403) return { devices: null }; throw error; });
   const list = $('device-list'); list.replaceChildren();
-  if (!data.devices) { list.append(el('p', 'dim', 'Hanya perangkat owner yang bisa melihat daftar ini. Kelola dari terminal: /remote-control devices.')); return; }
+  if (!data.devices) { list.append(el('p', 'dim', 'Only the owner’s device can see this list. Manage devices from the terminal with /remote-control devices.')); return; }
   const devices = data.devices.filter(d => !d.revoked);
-  if (!devices.length) list.append(el('p', 'dim', 'Belum ada perangkat.'));
+  if (!devices.length) list.append(el('p', 'dim', 'No devices yet.'));
   for (const device of devices) {
     const card = el('div', 'card'); const info = el('div', 'grow');
-    const expires = device.expiresAt ? new Date(device.expiresAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '';
-    info.append(el('strong', '', `${device.name}${device.clientId === state.clientId ? ' (perangkat ini)' : ''}`), el('small', '', `${device.clientId.slice(0, 8)}${expires ? ` · berlaku s.d. ${expires}` : ''}`));
-    const button = el('button', 'btn ghost small danger', 'Cabut'); button.type = 'button';
+    const expires = device.expiresAt ? new Date(device.expiresAt).toLocaleDateString('en', { day: 'numeric', month: 'short' }) : '';
+    info.append(el('strong', '', `${device.name}${device.clientId === state.clientId ? ' (this device)' : ''}`), el('small', '', `${device.clientId.slice(0, 8)}${expires ? ` · expires ${expires}` : ''}`));
+    const button = el('button', 'btn ghost small danger', 'Revoke'); button.type = 'button';
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
         await api(`/api/devices/${encodeURIComponent(device.clientId)}`, { method: 'DELETE' });
         if (device.clientId === state.clientId) { showPair(ERRORS.device_revoked); return; }
-        toast('Akses dicabut.'); await loadDevices();
+        toast('Access revoked.'); await loadDevices();
       } catch (error) { button.disabled = false; toast(error.message, 'error'); }
     });
     card.append(info, button); list.append(card);
@@ -748,27 +881,28 @@ async function loadDevices() {
 async function loadBackground() {
   const data = await api('/api/background');
   $('background-backend').textContent = data.backend === 'tmux'
-    ? 'Mesin: tmux. Sesi bisa dilanjutkan di terminal dengan /remote-control attach atau tmux attach.'
-    : 'Mesin: mode RPC Pi (tmux tidak ditemukan). Pasang tmux (sudo apt install tmux / brew install tmux) agar bisa mengintip sesi di terminal.';
+    ? 'Backend: tmux. Continue a session in the terminal with /remote-control attach or tmux attach.'
+    : 'Backend: Pi RPC mode (tmux not found). Install tmux (sudo apt install tmux / brew install tmux) to view sessions in the terminal.';
   $('background-folders').replaceChildren(...(data.folders ?? []).map(folder => { const option = document.createElement('option'); option.value = folder; return option; }));
   if (!$('background-folder').value && data.folders?.[0]) $('background-folder').value = data.folders[0];
   const list = $('background-list'); list.replaceChildren();
-  if (!data.sessions?.length) { list.append(el('p', 'dim', 'Belum ada sesi background.')); return; }
+  if (!data.sessions?.length) { list.append(el('p', 'dim', 'No background sessions.')); return; }
   for (const entry of data.sessions) {
     const card = el('div', 'card'); const info = el('div', 'grow');
-    info.append(el('strong', '', entry.title || basename(entry.cwd) || entry.name), el('small', '', `${entry.name} · ${entry.backend} · ${entry.cwd}`));
+    info.append(el('strong', '', entry.preview ? `"${entry.preview}"` : entry.messageCount === 0 ? '(empty)' : entry.title || basename(entry.cwd) || entry.name),
+      el('small', '', [entry.name, entry.backend, typeof entry.messageCount === 'number' ? `${entry.messageCount} msg` : '', entry.cwd].filter(Boolean).join(' · ')));
     if (entry.attach) info.append(el('code', 'cmd', entry.attach));
     const actions = el('div', 'actions');
     if (entry.sessionId) {
-      const open = el('button', 'btn small', 'Buka'); open.type = 'button';
+      const open = el('button', 'btn small', 'Open'); open.type = 'button';
       open.addEventListener('click', () => { $('panel').hidden = true; state.pinnedEnded = false; selectSession(entry.sessionId); });
       actions.append(open);
     }
-    const stopButton = el('button', 'btn ghost small danger', 'Hentikan'); stopButton.type = 'button';
+    const stopButton = el('button', 'btn ghost small danger', 'Stop'); stopButton.type = 'button';
     stopButton.addEventListener('click', async () => {
-      stopButton.disabled = true; stopButton.textContent = 'Menghentikan…';
-      try { await api(`/api/background/${encodeURIComponent(entry.name)}/stop`, { method: 'POST', body: {} }); toast('Sesi background dihentikan. Percakapannya tetap tersimpan.'); await loadBackground(); }
-      catch (error) { stopButton.disabled = false; stopButton.textContent = 'Hentikan'; toast(error.message, 'error'); }
+      stopButton.disabled = true; stopButton.textContent = 'Stopping…';
+      try { await api(`/api/background/${encodeURIComponent(entry.name)}/stop`, { method: 'POST', body: {} }); toast('Background session stopped. Its conversation is still saved.'); await loadBackground(); }
+      catch (error) { stopButton.disabled = false; stopButton.textContent = 'Stop'; toast(error.message, 'error'); }
     });
     actions.append(stopButton);
     card.append(info, actions); list.append(card);
@@ -787,14 +921,14 @@ async function loadModels() {
 function renderModels() {
   const query = $('model-filter').value.trim().toLowerCase();
   const shown = models.filter(m => `${m.provider}/${m.id} ${m.name ?? ''}`.toLowerCase().includes(query)).slice(0, 200);
-  $('model-list').replaceChildren(...(shown.length ? shown.map(m => el('div', '', `${m.provider}/${m.id}${m.reasoning ? ' · reasoning' : ''}`)) : [el('p', 'dim', 'Tidak ada model.')]));
+  $('model-list').replaceChildren(...(shown.length ? shown.map(m => el('div', '', `${m.provider}/${m.id}${m.reasoning ? ' · reasoning' : ''}`)) : [el('p', 'dim', 'No models found.')]));
 }
 
 async function loadWorkflows() {
   if (!$('workflow-json').value) $('workflow-json').value = JSON.stringify(workflowPlanExample(), null, 2);
   const data = await api('/api/workflows');
   const list = $('workflow-list'); list.replaceChildren();
-  if (!data.workflows?.length) { list.append(el('p', 'dim', 'Belum ada workflow.')); return; }
+  if (!data.workflows?.length) { list.append(el('p', 'dim', 'No workflows yet.')); return; }
   for (const raw of [...data.workflows].reverse()) {
     const workflow = raw.snapshot ?? raw;
     const card = el('div', 'card'); const info = el('div', 'grow');
@@ -803,7 +937,7 @@ async function loadWorkflows() {
     info.append(el('pre', '', tasks.join('\n')));
     card.append(info);
     if (['proposed', 'running', 'waiting_input', 'reviewing'].includes(workflow.status)) {
-      const cancel = el('button', 'btn ghost small danger', 'Batalkan'); cancel.type = 'button';
+      const cancel = el('button', 'btn ghost small danger', 'Cancel'); cancel.type = 'button';
       cancel.addEventListener('click', async () => {
         cancel.disabled = true;
         try { await api(`/api/workflows/${encodeURIComponent(workflow.workflowId)}/cancel`, { method: 'POST', body: {} }); await loadWorkflows(); }
@@ -843,6 +977,16 @@ function initialize() {
     if (!$('stop').hidden && $('panel').hidden && $('drawer').hidden && !state.slash.open) void stop();
   });
   $('stop').addEventListener('click', () => void stop());
+  $('attach').addEventListener('click', () => $('file-input').click());
+  $('file-input').addEventListener('change', event => { addFiles(event.target.files); event.target.value = ''; });
+  $('input').addEventListener('paste', event => {
+    const files = [...(event.clipboardData?.files ?? [])];
+    if (files.length) { event.preventDefault(); addFiles(files); }
+  });
+  const composer = $('composer');
+  composer.addEventListener('dragover', event => { if ([...(event.dataTransfer?.types ?? [])].includes('Files')) { event.preventDefault(); composer.classList.add('dragging'); } });
+  composer.addEventListener('dragleave', () => composer.classList.remove('dragging'));
+  composer.addEventListener('drop', event => { composer.classList.remove('dragging'); if (event.dataTransfer?.files?.length) { event.preventDefault(); addFiles(event.dataTransfer.files); } });
   $('mode-toggle').addEventListener('click', () => { state.mode = state.mode === 'steer' ? 'follow_up' : 'steer'; updateChrome(); });
   $('transcript').addEventListener('scroll', () => {
     const node = $('transcript');
@@ -858,14 +1002,14 @@ function initialize() {
   $('logout').addEventListener('click', async () => {
     try { await api('/api/logout', { method: 'POST', body: {} }); } catch { /* already signed out */ }
     setSealCreds(null);
-    showPair('Anda sudah keluar. Scan QR dari /remote-control untuk masuk lagi.');
+    showPair('You’re signed out. Run /remote-control pair in the Pi terminal, then scan the QR to sign in again.');
   });
   $('background-form').addEventListener('submit', async event => {
     event.preventDefault();
     const button = event.currentTarget.querySelector('button'); button.disabled = true;
     try {
       const entry = await api('/api/background', { method: 'POST', body: { cwd: $('background-folder').value } });
-      toast(`Sesi background dimulai (${entry.name}). Muncul di daftar sesi dalam beberapa detik.`);
+      toast(`Background session started (${entry.name}). It will appear in the session list in a few seconds.`);
       await loadBackground();
       setTimeout(() => void refreshSessions(false).then(() => { const live = state.sessions.find(x => x.background?.name === entry.name); if (live) { $('panel').hidden = true; selectSession(live.sessionId); } }).catch(() => {}), 4000);
     } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
@@ -874,13 +1018,13 @@ function initialize() {
   $('model-filter').addEventListener('input', renderModels);
   $('config-form').addEventListener('submit', async event => {
     event.preventDefault();
-    try { await api('/api/config', { method: 'PUT', body: JSON.parse($('config-json').value) }); toast('Pengaturan disimpan.'); }
-    catch (error) { toast(error instanceof SyntaxError ? 'JSON tidak valid.' : error.message, 'error'); }
+    try { await api('/api/config', { method: 'PUT', body: JSON.parse($('config-json').value) }); toast('Settings saved.'); }
+    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
   });
   $('workflow-form').addEventListener('submit', async event => {
     event.preventDefault();
-    try { await api('/api/workflows', { method: 'POST', body: JSON.parse($('workflow-json').value) }); toast('Workflow dijadwalkan.'); await loadWorkflows(); }
-    catch (error) { toast(error instanceof SyntaxError ? 'JSON tidak valid.' : error.message, 'error'); }
+    try { await api('/api/workflows', { method: 'POST', body: JSON.parse($('workflow-json').value) }); toast('Workflow scheduled.'); await loadWorkflows(); }
+    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
   });
   state.tickTimer = setInterval(updateWorking, 1000);
   document.addEventListener('visibilitychange', () => {

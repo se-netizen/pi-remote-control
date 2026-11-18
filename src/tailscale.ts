@@ -41,9 +41,9 @@ export function parseWhois(json: string): TailscaleIdentity | undefined {
   const node = data?.Node, user = data?.UserProfile;
   if (!node || typeof node.StableID !== 'string') return undefined;
   const tags = Array.isArray(node.Tags) ? node.Tags : [];
-  const name = String(node.ComputedName || node.Hostinfo?.Hostname || String(node.Name ?? '').split('.')[0] || 'Perangkat');
+  const name = String(node.ComputedName || node.Hostinfo?.Hostname || String(node.Name ?? '').split('.')[0] || 'Device');
   return {
-    nodeId: node.StableID, nodeName: name.replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 60) || 'Perangkat',
+    nodeId: node.StableID, nodeName: name.replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 60) || 'Device',
     userId: String(node.User ?? user?.ID ?? ''), login: String(user?.LoginName ?? ''), tagged: tags.length > 0,
   };
 }
