@@ -6,7 +6,6 @@ import { mkdir, lstat, chmod, readFile, writeFile, unlink, realpath } from 'node
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { execFile } from 'node:child_process';
-import { startServer } from './server.js';
 import { tailscaleAuth } from './tailscale.js';
 import { assert } from './errors.js';
 
@@ -15,23 +14,26 @@ const {values,positionals}=parseArgs({allowPositionals:true,options:{
   network:{type:'boolean'},'allow-checks':{type:'boolean'},owner:{type:'boolean'},viewer:{type:'boolean'},'no-tailscale-login':{type:'boolean'},session:{type:'string',multiple:true},help:{type:'boolean'},
 }});
 const action=positionals[0]??'start';
+/** How to run this CLI again: the installed command, or npm start from a source checkout. */
+const CMD=/\.ts$/.test(process.argv[1]??'')?'npm start --':'pi-remote-control';
+const PAD=' '.repeat(CMD.length+9);
 if(values.help||action==='help') {
   console.log(`Pi Remote Control: control Pi sessions from your phone or browser
 
 Daemon
-  npm start -- start [--host 127.0.0.1] [--port 3141] [--allow-http] [--origin URL]...
-                     [--no-tailscale-login] [--data-dir PATH]
-                     [--workspace /git/repo] [--tools read,grep,find,ls,edit,write,bash] [--network] [--allow-checks]
-  npm start -- status                      daemon, addresses, sessions, devices
+  ${CMD} start [--host 127.0.0.1] [--port 3141] [--allow-http] [--origin URL]...
+${PAD}[--no-tailscale-login] [--data-dir PATH]
+${PAD}[--workspace /git/repo] [--tools read,grep,find,ls,edit,write,bash] [--network] [--allow-checks]
+  ${CMD} status                      daemon, addresses, sessions, devices
 
 Devices
-  npm start -- pair [--viewer] [--session ID]   single-use link, 5 minutes (owner unless --viewer)
-  npm start -- revoke ID_OR_PREFIX              revoke a device's access
+  ${CMD} pair [--viewer] [--session ID]   single-use link, 5 minutes (owner unless --viewer)
+  ${CMD} revoke ID_OR_PREFIX              revoke a device's access
 
 Background sessions
-  npm start -- sessions                    list background sessions
-  npm start -- new [FOLDER]                start Pi in the background (default: this folder)
-  npm start -- stop pi-rc-XXXXXX           stop a background session
+  ${CMD} sessions                    list background sessions
+  ${CMD} new [FOLDER]                start Pi in the background (default: this folder)
+  ${CMD} stop pi-rc-XXXXXX           stop a background session
 
 Start options
   --host 0.0.0.0 --allow-http   listen on all interfaces; every IP of this machine (LAN, Tailscale 100.x,
@@ -42,7 +44,7 @@ Start options
   --workspace PATH              enable the workflow orchestrator on this Git repo
   --tools LIST / --network / --allow-checks   workflow worker tool policy (not an OS sandbox)
 
-In Pi: install this package (npm run pi:install), then type /remote-control. Guide: docs/GUIDE.md`);
+In Pi: ${CMD==='npm start --'?'npm run pi:install':'pi install npm:@se-netizen/pi-remote-control'}, then type /remote-control. Docs: https://github.com/se-netizen/pi-remote-control#readme`);
 } else await main();
 
 /** Best effort: the MagicDNS name of this machine, so http://NAME:PORT works on a wildcard listener. */
@@ -96,8 +98,12 @@ async function main() {
       const hostnames=['0.0.0.0','::'].includes(values.host??'')&&values['allow-http']?await tailscaleNames():[];
       const tailscale=values['no-tailscale-login']?undefined:tailscaleAuth();
       const tailscaleOwner=tailscale?await tailscale.ownerUserId():undefined;
+      // node:sqlite is stable enough for this use; keep its "experimental" notice out of the daemon output.
+      process.removeAllListeners('warning');
+      process.on('warning',w=>{if(!(w.name==='ExperimentalWarning'&&/SQLite/i.test(w.message)))console.warn(`${w.name}: ${w.message}`);});
+      const { startServer } = await import('./server.js');
       const app=await startServer({dataDir,secret,port,host:values.host,origin,hostnames,allowHttp:values['allow-http'],tailscale:tailscaleOwner?tailscale:undefined,workspace,tools,network:values.network,allowChecks:values['allow-checks']});
-      console.log(`Pi Remote Control:\n${app.urls.map(u=>`  ${u}`).join('\n')}\nListen: ${app.bindHost}:${port}\nIPC: ${app.socketPath}\nTurn on /remote-control in Pi, then run npm start -- pair.`);
+      console.log(`Pi Remote Control:\n${app.urls.map(u=>`  ${u}`).join('\n')}\nListen: ${app.bindHost}:${port}\nIPC: ${app.socketPath}\nTurn on /remote-control in Pi, then run ${CMD} pair.`);
       console.log(tailscaleOwner?'Tailscale sign-in: on. Devices on the same Tailscale account as this machine sign in without a QR (turn off: --no-tailscale-login).':'Tailscale sign-in: off (Tailscale is not running, or --no-tailscale-login).');
       if(workspace)console.log(`Workspace orchestrator: ${workspace}; tools: ${tools.join(',')}; concurrency default: 2`);
       let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;await app.close();await unlink(lockPath).catch(()=>{});};
@@ -114,7 +120,7 @@ async function main() {
   const result=await new Promise<any>((ok,fail)=>{
     const socket=connect(join(dataDir,'bridge.sock'));let buffer='';
     const timer=setTimeout(()=>{socket.destroy();fail(new Error('Daemon request timed out'));},action==='stop'?20000:8000);
-    socket.setEncoding('utf8');socket.on('error',()=>{clearTimeout(timer);fail(new Error('The daemon is not running. Run npm start -- start.'));});
+    socket.setEncoding('utf8');socket.on('error',()=>{clearTimeout(timer);fail(new Error(`The daemon is not running. Run ${CMD} start.`));});
     socket.on('connect',()=>socket.write(JSON.stringify(message)+'\n'));
     socket.on('data',chunk=>{buffer+=chunk;if(buffer.includes('\n')){clearTimeout(timer);socket.end();try{ok(JSON.parse(buffer.slice(0,buffer.indexOf('\n'))));}catch(error){fail(error);}}});
   });

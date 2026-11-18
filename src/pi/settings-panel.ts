@@ -116,7 +116,7 @@ export async function openSettingsPanel(host: PanelHost, ctx: PanelContext, star
     void reload();
     const finish = (value: string | undefined) => { if (closed) return; closed = true; done(value); };
 
-    const daemonDown = 'The daemon is not running. Start it with npm start -- start (or systemctl --user start pi-remote-control).';
+    const daemonDown = 'The daemon is not running. Start it with pi-remote-control start (from source: npm start -- start).';
     const toggle = (key: string, label: string, on: boolean, about: string, act: () => Promise<void> | void): Row =>
       ({ key, label, value: on ? '● on' : '○ off', tone: on ? 'success' : 'muted', about, act: async () => { await act(); } });
     const daemonSetting = (key: 'tailscaleLogin' | 'lan' | 'uploads' | 'activity', label: string, about: string, unavailable?: string): Row => {
@@ -148,7 +148,7 @@ export async function openSettingsPanel(host: PanelHost, ctx: PanelContext, star
       ];
       if (TABS[tab] === 'Status') {
         const info = (label: string, value: string, tone: Tone = 'text'): Row => ({ key: label, label, value, tone, info: true });
-        if (!data.daemon) return [info('Daemon', data.loading ? 'checking…' : 'not running', data.loading ? 'muted' : 'error'), ...(data.loading ? [] : [info('Start it', 'npm start -- start', 'muted')])];
+        if (!data.daemon) return [info('Daemon', data.loading ? 'checking…' : 'not running', data.loading ? 'muted' : 'error'), ...(data.loading ? [] : [info('Start it', 'pi-remote-control start', 'muted')])];
         const urls: string[] = Array.isArray(data.status?.urls) ? data.status!.urls! : host.urls;
         const phone = preferredPhoneUrl(urls) ?? host.url;
         const devices = (data.status?.devices ?? []).filter((d: any) => !d.revoked);

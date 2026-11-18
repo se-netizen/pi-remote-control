@@ -1,0 +1,40 @@
+name: publish
+# Publishes to npm when a version tag is pushed:
+#   npm version patch        # bumps package.json, commits, tags vX.Y.Z
+#   git push --follow-tags
+# Uses npm trusted publishing (GitHub OIDC): no npm token is stored in GitHub.
+# One-time setup on npmjs.com: package › Settings › Trusted publishing › GitHub Actions,
+# owner se-netizen, repository pi-remote-control, workflow publish.yml.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # Trusted publishing needs npm 11.5 or newer; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run check
+      - name: Tag must match package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - name: Skip versions that are already on npm
+        id: published
+        run: |
+          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      # prepack builds dist/ first; trusted publishing also adds provenance.
+      - if: steps.published.outputs.skip != 'true'
+        run: npm publish --access public

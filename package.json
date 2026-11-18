@@ -1,9 +1,34 @@
 {
-  "name": "pi-remote-control-local",
+  "name": "@se-netizen/pi-remote-control",
   "version": "0.1.0",
-  "private": true,
+  "description": "Control your Pi coding-agent sessions from your phone or browser: live chat, files and photos, background sessions, over Tailscale or encrypted Wi-Fi.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "remote-control",
+    "tailscale",
+    "mobile"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/se-netizen/pi-remote-control.git"
+  },
+  "homepage": "https://github.com/se-netizen/pi-remote-control#readme",
+  "bugs": {
+    "url": "https://github.com/se-netizen/pi-remote-control/issues"
+  },
   "type": "module",
-  "description": "Private remote control and deterministic workflow orchestration for Pi",
+  "bin": {
+    "pi-remote-control": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src/",
+    "dist/web/",
+    "src/",
+    "extensions/"
+  ],
   "pi": {
     "extensions": [
       "./extensions/remote-control.ts"
@@ -20,7 +45,8 @@
     "build": "tsc && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
