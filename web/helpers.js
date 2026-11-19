@@ -66,22 +66,6 @@ export function hasCapability(session, kind) {
   return (aliases[kind] ?? [kind]).some(key => Array.isArray(capabilities) ? capabilities.includes(key) : capabilities?.[key] === true);
 }
 
-export function workflowPlanExample() {
-  return {
-    plan: {
-      goal: 'Update the project documentation',
-      maxConcurrency: 2,
-      tasks: [{
-        taskId: 'docs', goal: 'Update the README to match the implementation',
-        role: 'worker', complexity: 'simple', scope: ['README.md'],
-        acceptanceCriteria: ['README includes installation steps that work as written'],
-        expectedArtifacts: ['README.md'], tools: ['read', 'edit', 'write'],
-      }],
-    },
-    run: true,
-  };
-}
-
 /**
  * Minimal Markdown parser for assistant text. Produces plain data (no HTML strings), so the
  * renderer can only ever create text nodes and a fixed set of elements.

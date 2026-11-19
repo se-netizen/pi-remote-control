@@ -36,8 +36,7 @@ test('HTTP + IPC: direct link pairing, cookie, CSRF, scope, dispatch, dedup, rev
     const command={commandId:randomUUID(),sessionId:'s1',runtimeId:'r1',bindingEpoch:1,branchId:'b1',leaseEpoch:lease.leaseEpoch,kind:'prompt',payload:{text:'test'},expiresAt:Date.now()+29_000};
     assert.equal((await api('/api/sessions/s1/commands','POST',command)).data.status,'dispatched_unconfirmed');
     await api('/api/sessions/s1/commands','POST',command);assert.equal(dispatches,1);
-    assert.equal((await api('/api/workflows','POST',{plan:{},policy:{scope:['**']}})).data.error,'policy_is_host_owned');
-    assert.equal((await api('/api/workflows','POST',{plan:{}})).data.error,'workspace_not_approved');
+    for(const removed of ['/api/workflows','/api/config','/api/models'])assert.equal((await api(removed)).response.status,404,'the orchestrator API is gone');
     const shell=await fetch(origin+'/');assert.equal(shell.status,200);assert.match(shell.headers.get('content-security-policy')!,/frame-ancestors 'none'/);
     const traversal=await fetch(origin+'/%2e%2e/package.json');assert.equal(traversal.status,404);
     const devices=await api('/api/devices');const id=devices.data.devices[0].clientId;

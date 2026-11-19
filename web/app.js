@@ -1,4 +1,4 @@
-import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, workflowPlanExample, matchCommands, splitAttachments, formatBytes, fileBadge, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } from './helpers.js';
+import { draftKey, createCommandId, parseMarkdown, toolSummary, resultText, mergeStreamText, matchCommands, splitAttachments, formatBytes, fileBadge, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } from './helpers.js';
 import { SEAL_CONTENT_TYPE, sealRequest, openResponse, sealStream, openEvent } from './seal.js';
 
 const $ = id => document.getElementById(id);
@@ -80,7 +80,7 @@ const ERRORS = {
   unauthenticated: 'This device isn’t paired. Run /remote-control pair in the Pi terminal, then scan the QR.', device_revoked: 'Access for this device was revoked. Run /remote-control pair in the Pi terminal to pair it again.',
   session_offline: 'The Pi session is offline.', session_busy: 'Pi is busy. Try again in a moment.', queue_full: 'Too many messages are waiting. Wait a moment, then try again.',
   rate_limited: 'Too many requests. Try again in a moment.', prompt_too_large: 'Message is too long (max 64 KiB). Shorten it or attach it as a file.',
-  slash_commands_disabled: 'Slash commands are sent as commands, not messages.', invalid_command: 'Invalid command format.', workspace_not_approved: 'The daemon wasn’t started with --workspace. Restart it with --workspace to run workflows.',
+  slash_commands_disabled: 'Slash commands are sent as commands, not messages.', invalid_command: 'Invalid command format.',
   forbidden: 'This device doesn’t have permission to do that.',
   folder_outside_home: 'The folder must be inside your home directory.', folder_not_found: 'Folder not found. Check the path.', invalid_folder: 'Enter the path of a project folder.', background_start_failed: 'Couldn’t start the background session.', background_not_found: 'Background session not found.',
   tailscale_blocked: 'Access for this device was revoked, so it can’t sign in automatically. Run /remote-control pair in the Pi terminal, then scan the QR.',
@@ -115,6 +115,7 @@ function showPair(message, tailscaleUrl) {
   $('chat-screen').hidden = true; $('panel').hidden = true; closeDrawer();
   $('pair-screen').hidden = false; $('pair-busy').hidden = true; $('pair-form').hidden = false;
   if (message) $('pair-message').textContent = message;
+  document.title = 'pi-pair';
   // Opened over Wi-Fi/LAN: the same host over Tailscale signs this phone in without a QR.
   const link = $('pair-tailscale');
   link.hidden = !tailscaleUrl;
@@ -251,7 +252,7 @@ function renderSessionList() {
     if (session.preview) text.append(el('small', 'preview', session.preview));
     text.append(el('small', '', [basename(session.cwd), session.model?.id, session.background ? 'background' : '', session.connection === 'offline' ? (session.moving ? 'moving' : 'ended') : ''].filter(Boolean).join(' · ')));
     button.append(dot, text);
-    button.addEventListener('click', () => { closeDrawer(); state.pinnedEnded = session.connection === 'offline'; if (session.sessionId !== state.sessionId) selectSession(session.sessionId); });
+    button.addEventListener('click', () => { if (!isWide()) closeDrawer(); state.pinnedEnded = session.connection === 'offline'; if (session.sessionId !== state.sessionId) selectSession(session.sessionId); });
     list.append(button);
   }
 }
@@ -462,22 +463,36 @@ function build(item) {
 
 function buildTool(item) {
   const open = state.open.has(item.key);
+  const toggle = () => {
+    if (state.open.has(item.key)) state.open.delete(item.key);
+    else state.open.add(item.key);
+    scheduleRender();
+  };
   const node = el('div', `tool${item.running ? ' running' : ''}${item.error ? ' error' : ''}${open ? ' open' : ''}`);
   const { label, detail } = toolSummary(item.name, item.args);
   const head = el('button', 'tool-head');
   head.type = 'button';
   head.setAttribute('aria-expanded', String(open));
   head.append(el('b', '', label), el('span', 'args', detail ? `(${detail})` : ''));
-  head.addEventListener('click', () => { if (state.open.has(item.key)) state.open.delete(item.key); else state.open.add(item.key); scheduleRender(); });
+  head.addEventListener('click', toggle);
   node.append(el('span', 'bullet'), head);
   const out = el('div', 'tool-out');
   const diff = editDiff(item.name, item.args);
   if (diff.length) for (const line of diff.slice(0, open ? 400 : 6)) out.append(el('span', line.kind, `${line.text}\n`));
   else if (item.running && !item.output) out.textContent = 'Running…';
   else out.textContent = (item.output || '(no output)').slice(0, open ? 20000 : 600);
+  if (!open) out.addEventListener('click', toggle);
   node.append(out);
   const lines = diff.length || (item.output || '').split('\n').length;
-  if (!open && lines > 3) node.append(el('div', 'more', `… +${lines - 3} lines · tap to expand`));
+  if (!open && lines > 3) {
+    const more = el('div', 'more', `… +${lines - 3} lines · tap to expand`);
+    more.addEventListener('click', toggle);
+    node.append(more);
+  } else if (open && lines > 3) {
+    const less = el('div', 'more', `Collapse output ↑`);
+    less.addEventListener('click', toggle);
+    node.append(less);
+  }
   return node;
 }
 
@@ -492,13 +507,62 @@ function editDiff(name, args) {
   return lines;
 }
 
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fallback below */ }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function markdown(text) {
   const fragment = document.createDocumentFragment();
   for (const block of parseMarkdown(text)) fragment.append(markdownBlock(block));
   return fragment;
 }
 function markdownBlock(block) {
-  if (block.type === 'code') { const pre = el('pre'); pre.append(el('code', '', block.text)); return pre; }
+  if (block.type === 'code') {
+    const wrap = el('div', 'code-block');
+    const head = el('div', 'code-header');
+    const lang = el('span', 'code-lang', block.lang || 'code');
+    const copy = el('button', 'code-copy-btn');
+    copy.type = 'button';
+    copy.setAttribute('aria-label', 'Copy code');
+    copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span>';
+
+    copy.addEventListener('click', async () => {
+      const ok = await copyToClipboard(block.text);
+      if (ok) {
+        copy.classList.add('copied');
+        copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span>Copied!</span>';
+        setTimeout(() => {
+          copy.classList.remove('copied');
+          copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span>';
+        }, 2000);
+      }
+    });
+
+    head.append(lang, copy);
+    const pre = el('pre');
+    pre.append(el('code', '', block.text));
+    wrap.append(head, pre);
+    return wrap;
+  }
   if (block.type === 'heading') return inlines(el(`h${Math.min(4, block.level)}`), block.inlines);
   if (block.type === 'quote') { const quote = el('blockquote'); for (const b of block.blocks) quote.append(markdownBlock(b)); return quote; }
   if (block.type === 'list') { const list = el(block.ordered ? 'ol' : 'ul'); for (const item of block.items) list.append(inlines(el('li'), item.inlines)); return list; }
@@ -520,9 +584,18 @@ function inlines(parent, parts) {
 function isRunning() { return ['running', 'stopping', 'waiting_local_input'].includes(state.session?.workState); }
 function isLive() { return state.online && !!state.session && state.session.connection !== 'offline' && state.session.workState !== 'ended'; }
 
+function formatTitle(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return 'pi-remote';
+  return clean.toLowerCase().startsWith('pi-') ? clean : `pi-${clean}`;
+}
+
 function updateChrome() {
   const session = state.session;
-  $('title').textContent = session ? (session.title || basename(session.cwd) || 'Pi session') : 'Pi';
+  const rawTitle = session ? (session.title || basename(session.cwd) || 'session') : 'remote';
+  const displayTitle = formatTitle(rawTitle);
+  $('title').textContent = displayTitle;
+  if ($('panel').hidden) document.title = displayTitle;
   const usage = session?.usage && typeof session.usage.percent === 'number' ? `${Math.round(session.usage.percent)}% context` : '';
   $('subtitle').textContent = session ? [session.background ? `background (${session.background.backend})` : '', basename(session.cwd), session.model?.id, session.thinkingLevel && session.thinkingLevel !== 'off' ? session.thinkingLevel : '', usage].filter(Boolean).join(' · ') : '';
   const status = $('status');
@@ -843,15 +916,54 @@ function renderPicker() {
 }
 
 /* ---------- drawer & panels ---------- */
-function openDrawer() { $('drawer').hidden = false; $('scrim').hidden = false; void refreshSessions(false).catch(() => {}); }
-function closeDrawer() { $('drawer').hidden = true; $('scrim').hidden = true; }
+const isWide = () => window.matchMedia('(min-width: 768px)').matches;
 
-const PANELS = { background: 'Background sessions', devices: 'Devices', settings: 'Models & settings', workflows: 'Orchestrator' };
+function updateSidebar(open, save = true) {
+  state.sidebarOpen = open;
+  if (save) {
+    try { localStorage.setItem('pi-sidebar', open ? 'open' : 'closed'); } catch { /* ignore */ }
+  }
+  const app = $('chat-screen');
+  if (app) {
+    app.classList.toggle('sidebar-collapsed', !open);
+    app.setAttribute('data-sidebar', open ? 'open' : 'closed');
+  }
+  const drawer = $('drawer');
+  if (drawer) {
+    if (isWide()) {
+      drawer.hidden = false;
+      drawer.classList.remove('open');
+      $('scrim').hidden = true;
+    } else {
+      drawer.hidden = !open;
+      drawer.classList.toggle('open', open);
+      $('scrim').hidden = !open;
+    }
+  }
+}
+
+function openDrawer() {
+  updateSidebar(true, true);
+  void refreshSessions(false).catch(() => {});
+}
+
+function closeDrawer() {
+  updateSidebar(false, true);
+}
+
+function toggleSidebar() {
+  updateSidebar(!state.sidebarOpen, true);
+}
+
+const PANELS = { background: 'pi-background', devices: 'pi-devices' };
 function openPanel(name) {
-  closeDrawer();
-  $('panel').hidden = false; $('panel-title').textContent = PANELS[name];
+  if (!isWide()) closeDrawer();
+  const panelTitle = PANELS[name] || `pi-${name}`;
+  $('panel').hidden = false;
+  $('panel-title').textContent = panelTitle;
+  document.title = panelTitle;
   for (const key of Object.keys(PANELS)) $(`panel-${key}`).hidden = key !== name;
-  const load = { background: loadBackground, devices: loadDevices, settings: loadConfig, workflows: loadWorkflows }[name];
+  const load = { background: loadBackground, devices: loadDevices }[name];
   void load().catch(error => toast(error.message, 'error'));
 }
 
@@ -909,48 +1021,53 @@ async function loadBackground() {
   }
 }
 
-async function loadConfig() { $('config-json').value = JSON.stringify(await api('/api/config'), null, 2); }
-let models = [];
-async function loadModels() {
-  $('load-models').disabled = true;
-  try {
-    models = ((await api('/api/models')).models ?? []).sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
-    $('model-filter').hidden = false; renderModels();
-  } catch (error) { toast(error.message, 'error'); } finally { $('load-models').disabled = false; }
-}
-function renderModels() {
-  const query = $('model-filter').value.trim().toLowerCase();
-  const shown = models.filter(m => `${m.provider}/${m.id} ${m.name ?? ''}`.toLowerCase().includes(query)).slice(0, 200);
-  $('model-list').replaceChildren(...(shown.length ? shown.map(m => el('div', '', `${m.provider}/${m.id}${m.reasoning ? ' · reasoning' : ''}`)) : [el('p', 'dim', 'No models found.')]));
-}
-
-async function loadWorkflows() {
-  if (!$('workflow-json').value) $('workflow-json').value = JSON.stringify(workflowPlanExample(), null, 2);
-  const data = await api('/api/workflows');
-  const list = $('workflow-list'); list.replaceChildren();
-  if (!data.workflows?.length) { list.append(el('p', 'dim', 'No workflows yet.')); return; }
-  for (const raw of [...data.workflows].reverse()) {
-    const workflow = raw.snapshot ?? raw;
-    const card = el('div', 'card'); const info = el('div', 'grow');
-    info.append(el('strong', '', `${workflow.goal ?? workflow.plan?.goal ?? workflow.workflowId} · ${workflow.status}`));
-    const tasks = (workflow.tasks ?? []).map(entry => `${entry.status === 'succeeded' ? '✓' : entry.status === 'failed' ? '✗' : entry.status === 'running' ? '●' : '·'} ${(entry.task ?? entry).taskId} — ${entry.status ?? 'proposed'}`);
-    info.append(el('pre', '', tasks.join('\n')));
-    card.append(info);
-    if (['proposed', 'running', 'waiting_input', 'reviewing'].includes(workflow.status)) {
-      const cancel = el('button', 'btn ghost small danger', 'Cancel'); cancel.type = 'button';
-      cancel.addEventListener('click', async () => {
-        cancel.disabled = true;
-        try { await api(`/api/workflows/${encodeURIComponent(workflow.workflowId)}/cancel`, { method: 'POST', body: {} }); await loadWorkflows(); }
-        catch (error) { cancel.disabled = false; toast(error.message, 'error'); }
-      });
-      card.append(cancel);
-    }
-    list.append(card);
-  }
+function applyTheme(choice) {
+  const theme = choice === 'dark' || choice === 'light' ? choice : 'system';
+  try { localStorage.setItem('pi-theme', theme); } catch { /* ignore */ }
+  document.documentElement.setAttribute('data-theme', theme);
+  const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.content = isDark ? '#1a1915' : '#faf9f5';
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    const val = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+    const active = val === theme;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-checked', String(active));
+  });
 }
 
 /* ---------- wiring ---------- */
 function initialize() {
+  const savedTheme = (() => { try { return localStorage.getItem('pi-theme') || 'system'; } catch { return 'system'; } })();
+  applyTheme(savedTheme);
+  const themeSwitch = $('theme-switch');
+  if (themeSwitch) {
+    const onThemeAction = event => {
+      const btn = event.target.closest('.theme-btn');
+      if (!btn) return;
+      const choice = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+      if (choice) applyTheme(choice);
+    };
+    themeSwitch.addEventListener('click', onThemeAction);
+  }
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const choice = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+      if (choice) applyTheme(choice);
+    });
+  });
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      try {
+        if ((localStorage.getItem('pi-theme') || 'system') === 'system') applyTheme('system');
+      } catch { /* ignore */ }
+    });
+  }
+  const savedSidebar = (() => {
+    try { return localStorage.getItem('pi-sidebar'); } catch { return null; }
+  })();
+  const initialSidebar = savedSidebar !== null ? savedSidebar === 'open' : true;
+  updateSidebar(initialSidebar, false);
   $('pair-form').addEventListener('submit', submitPairLink);
   $('composer').addEventListener('submit', event => { event.preventDefault(); void send(); });
   $('input').addEventListener('input', () => { autosize(); saveDraft(); updateSend(); updateSlash(); });
@@ -974,7 +1091,9 @@ function initialize() {
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     if (!$('picker').hidden) { closePicker(); return; }
-    if (!$('stop').hidden && $('panel').hidden && $('drawer').hidden && !state.slash.open) void stop();
+    if (!$('panel').hidden) { $('panel').hidden = true; updateChrome(); return; }
+    if (!isWide() && state.sidebarOpen) { closeDrawer(); return; }
+    if (!$('stop').hidden && !state.slash.open) void stop();
   });
   $('stop').addEventListener('click', () => void stop());
   $('attach').addEventListener('click', () => $('file-input').click());
@@ -994,11 +1113,14 @@ function initialize() {
     $('jump').hidden = state.stick;
   }, { passive: true });
   $('jump').addEventListener('click', () => { state.stick = true; $('transcript').scrollTop = $('transcript').scrollHeight; $('jump').hidden = true; });
-  $('menu-button').addEventListener('click', openDrawer);
-  $('drawer-close').addEventListener('click', closeDrawer);
+  $('menu-button').addEventListener('click', toggleSidebar);
+  $('drawer-close').addEventListener('click', toggleSidebar);
   $('scrim').addEventListener('click', closeDrawer);
+  window.addEventListener('resize', () => {
+    updateSidebar(state.sidebarOpen, false);
+  });
   document.querySelectorAll('[data-panel]').forEach(button => button.addEventListener('click', () => openPanel(button.dataset.panel)));
-  $('panel-back').addEventListener('click', () => { $('panel').hidden = true; });
+  $('panel-back').addEventListener('click', () => { $('panel').hidden = true; updateChrome(); });
   $('logout').addEventListener('click', async () => {
     try { await api('/api/logout', { method: 'POST', body: {} }); } catch { /* already signed out */ }
     setSealCreds(null);
@@ -1013,18 +1135,6 @@ function initialize() {
       await loadBackground();
       setTimeout(() => void refreshSessions(false).then(() => { const live = state.sessions.find(x => x.background?.name === entry.name); if (live) { $('panel').hidden = true; selectSession(live.sessionId); } }).catch(() => {}), 4000);
     } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
-  });
-  $('load-models').addEventListener('click', () => void loadModels());
-  $('model-filter').addEventListener('input', renderModels);
-  $('config-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try { await api('/api/config', { method: 'PUT', body: JSON.parse($('config-json').value) }); toast('Settings saved.'); }
-    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
-  });
-  $('workflow-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try { await api('/api/workflows', { method: 'POST', body: JSON.parse($('workflow-json').value) }); toast('Workflow scheduled.'); await loadWorkflows(); }
-    catch (error) { toast(error instanceof SyntaxError ? 'Invalid JSON.' : error.message, 'error'); }
   });
   state.tickTimer = setInterval(updateWorking, 1000);
   document.addEventListener('visibilitychange', () => {

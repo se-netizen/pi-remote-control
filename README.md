@@ -14,10 +14,12 @@ Tested on Linux with Node 22.23 and Pi 1.5.2. Windows is not supported for the d
 ## Quick start
 
 ```sh
-npm ci && npm run build
-npm run pi:install                              # register the extension with Pi
-npm start -- start --host 0.0.0.0 --allow-http  # run the daemon
+npm install -g @se-netizen/pi-remote-control           # the daemon (command: pi-remote-control)
+pi install npm:@se-netizen/pi-remote-control           # the Pi extension
+pi-remote-control start --host 0.0.0.0 --allow-http    # run the daemon
 ```
+
+From a source checkout instead: `npm ci && npm run build && npm run pi:install`, then `npm start -- start --host 0.0.0.0 --allow-http`.
 
 Then in Pi (run `/reload` if Pi is already open):
 
@@ -44,11 +46,12 @@ Scan the QR with your phone camera, or open `http://YOUR-COMPUTER-TAILSCALE-IP:3
 /remote-control detach          # keep this session running in the background, close Pi in the terminal
 /remote-control attach [show]   # bring a background session back (or just look at it)
 /remote-control auto [on|off]   # every new Pi shows up on your phone automatically
-/remote-control status | devices | revoke ID | stop
+/remote-control settings         # panel: switches, status, devices, background sessions
+/remote-control status | devices | revoke ID | stop | help
 ```
 
 ```sh
-npm start -- status | pair | revoke ID | sessions | new [FOLDER] | stop pi-rc-xxxxxx
+pi-remote-control status | pair | revoke ID | sessions | new [FOLDER] | stop pi-rc-xxxxxx   # from source: npm start -- …
 ```
 
 ## Development
@@ -61,4 +64,8 @@ PI_REMOTE_REAL_SMOKE=1 npx tsx --test tests/pi-adapter.test.ts   # smoke test ag
 
 Layout: `extensions/remote-control.ts` (Pi entry) → `src/pi/attach-bridge.ts` (extension), `src/server.ts` and `src/core.ts` (daemon), `src/seal.ts` (Wi-Fi encryption), `src/tailscale.ts` (Tailscale sign-in), `src/background.ts` (background sessions), `src/uploads.ts` (files from the phone), `web/` (web app, no build step).
 
-Daemon data lives in `~/.pi/remote-control/` (0700/0600) and must never be committed. The package name is a working name; it is not published.
+Daemon data lives in `~/.pi/remote-control/` (0700/0600) and must never be committed.
+
+## License
+
+MIT

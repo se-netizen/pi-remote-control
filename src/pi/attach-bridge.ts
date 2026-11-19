@@ -333,7 +333,7 @@ export class AttachBridge {
       }, 256 * 1024);
       socket.once('connect', () => socket.write(`${JSON.stringify({ ...fields, type: 'admin', secret, action })}\n`));
       socket.on('data', (chunk: string) => { try { lines.push(chunk); } catch { finish(new Error('Invalid daemon response')); } });
-      socket.once('error', () => finish(new Error('The daemon is not running. Run npm start -- start in the pi-remote-control folder.')));
+      socket.once('error', () => finish(new Error('The daemon is not running. Start it with: pi-remote-control start (from source: npm start -- start).')));
       socket.once('close', () => finish(new Error('Daemon closed the request before replying')));
     });
   }
@@ -417,7 +417,7 @@ export class AttachBridge {
       clearTimeout(timeout); fail?.(new Error('Daemon connection closed'));
       if (this.socket === socket) { this.socket = undefined; this.registered = false; this.retry(); }
     });
-    socket.once('error', () => { clearTimeout(timeout); fail?.(new Error('Daemon is unavailable; run npm start -- serve')); });
+    socket.once('error', () => { clearTimeout(timeout); fail?.(new Error('The daemon is not running. Start it with: pi-remote-control start (from source: npm start -- start).')); });
     socket.once('connect', () => {
       if (!this.enabled || epoch !== this.bindingEpoch) { socket.destroy(); return; }
       this.send({ type: 'register', secret, session: this.snapshot(), launcher: launcherInfo() });

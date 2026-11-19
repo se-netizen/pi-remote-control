@@ -8,9 +8,6 @@ import { RemoteCore, sessionPreview } from './core.js';
 import { assert, RemoteError } from './errors.js';
 import { MAX_FRAME, object, type Command, type Device } from './protocol.js';
 import { Store } from './store.js';
-import { defaultSettings, parseSettings } from './settings.js';
-import type { WorkflowPolicy } from './workflow/types.js';
-import { PiRpcWorker } from './pi/rpc-worker.js';
 import { BackgroundManager } from './background.js';
 import { OriginPolicy } from './origins.js';
 import { UploadStore, UPLOAD_CHUNK_BYTES } from './uploads.js';
@@ -27,9 +24,7 @@ export interface ServerOptions {
   background?: BackgroundManager;
   /** Test hook: the peer address of a request (defaults to the TCP socket's remote address). */
   remoteAddressOf?: (req: IncomingMessage) => string | undefined;
-  workspace?: string; tools?: string[]; network?: boolean; allowChecks?: boolean;
 }
-type SchedulerLike = { submit(plan: any,policy: WorkflowPolicy): any; start(id:string): Promise<any>; cancel(id:string): any; get(id:string): any; list(): any[]; hasActiveWorkers():boolean; close():Promise<void>; on(name:string,callback:(value:any)=>void):any };
 
 export async function startServer(options: ServerOptions) {
   const port=options.port??3141;
@@ -83,7 +78,6 @@ export async function startServer(options: ServerOptions) {
   }
   let shuttingDown=false;
   if(!store.get('hostId'))store.set('hostId',randomUUID());
-  if(!store.get('settings'))store.set('settings',defaultSettings);
   const sockets=new Set<Socket>();const pending=new Map<string,{resolve:(value:any)=>void;timer:ReturnType<typeof setTimeout>;socket:Socket}>();
   const socketPath=resolve(options.dataDir,'bridge.sock');
   const ipc=createNetServer(socket=>{
@@ -183,7 +177,7 @@ export async function startServer(options: ServerOptions) {
       assert(matches.length===1,matches.length?'device_ambiguous':'device_not_found',matches.length?409:404);
       core.revokeLocal(matches[0]!.clientId);return {status:'revoked',clientId:matches[0]!.clientId,name:matches[0]!.name};
     }
-    if(m.action==='status')return {hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),bindHost:host,port,sessions:[...core.sessions.values()].map(b=>{const {messages,...rest}=b.session;return rest;}),devices:store.devices().map(({clientId,name,grants,owner,revoked,expiresAt,via})=>({clientId,name,grants,owner,revoked,expiresAt,via})),workspace:options.workspace??null};
+    if(m.action==='status')return {hostId:store.get('hostId'),url:origins.primary(),urls:origins.advertised(),bindHost:host,port,sessions:[...core.sessions.values()].map(b=>{const {messages,...rest}=b.session;return rest;}),devices:store.devices().map(({clientId,name,grants,owner,revoked,expiresAt,via})=>({clientId,name,grants,owner,revoked,expiresAt,via}))};
     throw new RemoteError('unknown_admin_action');
   }
   // Tell the terminal that owns a session which device just joined it.
@@ -192,39 +186,6 @@ export async function startServer(options: ServerOptions) {
     for(const id of info.sessionIds){const owner=core.sessions.get(id)?.owner as Socket|undefined;if(!owner||notified.has(owner)||owner.destroyed)continue;notified.add(owner);owner.write(JSON.stringify({type:'paired',name:info.name})+'\n');}
   });
 
-  let scheduler:SchedulerLike|undefined;
-  let schedulerLoading:Promise<SchedulerLike>|undefined;
-  let modelsLoading:Promise<unknown[]>|undefined;
-  let modelsCache:{at:number;models:unknown[]}|undefined;
-  async function getModels():Promise<unknown[]> {
-    assert(!shuttingDown,'shutting_down',503);
-    if(modelsCache&&Date.now()-modelsCache.at<60_000)return modelsCache.models;
-    if(modelsLoading)return modelsLoading;
-    modelsLoading=(async()=>{
-      const worker=new PiRpcWorker({cwd:options.workspace??process.cwd(),tools:[]});
-      try {
-        await worker.start();const models=await worker.getAvailableModels();
-        const safe=models.map(m=>({provider:m.provider,id:m.id,name:m.name,reasoning:m.reasoning,cost:m.cost}));
-        modelsCache={at:Date.now(),models:safe};return safe;
-      }finally{await worker.close();}
-    })();
-    try{return await modelsLoading;}finally{modelsLoading=undefined;}
-  }
-  async function getScheduler():Promise<SchedulerLike> {
-    assert(!shuttingDown,'shutting_down',503);
-    assert(options.workspace,'workspace_not_approved',403);
-    if(scheduler)return scheduler;
-    if(schedulerLoading)return schedulerLoading;
-    schedulerLoading=(async()=>{
-      const mod=await import('./workflow/index.js');
-      const config=store.get<any>('settings');
-      const runner=mod.createPiWorkflowRunner({workspaceRoot:options.workspace!,stateDir:resolve(options.dataDir,'workers')});
-      scheduler=new mod.WorkflowScheduler({runner,store:new mod.FileWorkflowStore(resolve(options.dataDir,'workflows')),profiles:config.profiles,maxHostConcurrency:config.maxConcurrency}) as unknown as SchedulerLike;
-      scheduler.on('change',snapshot=>core.event('workflow.changed',{workflowId:snapshot.workflowId,status:snapshot.status,updatedAt:snapshot.updatedAt}));
-      return scheduler;
-    })();
-    try{return await schedulerLoading;}finally{schedulerLoading=undefined;}
-  }
   const staticDir=resolve(dirname(fileURLToPath(import.meta.url)),'../web');
   const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
   const rates=new Map<string,{count:number;until:number}>();
@@ -468,24 +429,6 @@ export async function startServer(options: ServerOptions) {
       if(url.pathname==='/api/devices'&&req.method==='GET'){core.requireOwner(device);json(res,200,{devices:store.devices().map(({wifiKey,...rest})=>rest)});return;}
       const deviceMatch=/^\/api\/devices\/([^/]+)$/.exec(url.pathname);
       if(deviceMatch&&req.method==='DELETE'){core.revoke(device,decodeURIComponent(deviceMatch[1]!));json(res,200,{status:'revoked'});return;}
-      if(url.pathname==='/api/config') {
-        core.requireOwner(device);
-        if(req.method==='GET'){json(res,200,store.get('settings'));return;}
-        if(req.method==='PUT'){const config=parseSettings(await body(req));if(schedulerLoading)await schedulerLoading;assert(!scheduler?.hasActiveWorkers()&&!scheduler?.list().some(w=>w.status==='running'),'workflow_running',409);if(scheduler)await scheduler.close();store.set('settings',config);scheduler=undefined;json(res,200,config);return;}
-      }
-      if(url.pathname==='/api/models'&&req.method==='GET'){core.requireOwner(device);json(res,200,{models:await getModels()});return;}
-      if(url.pathname.startsWith('/api/workflows')) {
-        core.requireOwner(device);
-        if(url.pathname==='/api/workflows'&&req.method==='GET'){json(res,200,{workflows:options.workspace?(await getScheduler()).list():[]});return;}
-        if(url.pathname==='/api/workflows'&&req.method==='POST') {
-          const b=object(await body(req));assert(b.policy===undefined,'policy_is_host_owned',403);
-          const s=await getScheduler(),config=store.get<any>('settings');
-          const policy:WorkflowPolicy={scope:['**'],tools:(options.tools??['read','grep','find','ls']) as WorkflowPolicy['tools'],network:options.network===true,maxConcurrency:config.maxConcurrency,maxAttempts:1,maxTasks:40,maxTaskTimeoutMs:600_000,maxDurationMs:3_600_000,allowChecks:options.allowChecks===true};
-          const w=s.submit(b.plan,policy);if(b.run!==false)void s.start(w.workflowId).catch(()=>{});json(res,202,w);return;
-        }
-        const cancelMatch=/^\/api\/workflows\/([^/]+)\/cancel$/.exec(url.pathname);
-        if(cancelMatch&&req.method==='POST'){json(res,200,(await getScheduler()).cancel(decodeURIComponent(cancelMatch[1]!)));return;}
-      }
       throw new RemoteError('not_found',404);
     }catch(error){if(!res.headersSent)json(res,error instanceof RemoteError?error.status:400,{error:error instanceof RemoteError?error.code:'request_failed',message:error instanceof Error?error.message:'Request failed'});else res.end();}
   });
@@ -498,9 +441,6 @@ export async function startServer(options: ServerOptions) {
   let closed=false;
   return {core,store,http,ipc,url:origins.primary(),urls:origins.advertised(),bindHost:host,socketPath,async close(){
     if(closed)return;closed=true;shuttingDown=true;clearInterval(retention);background.close();
-    if(schedulerLoading)await schedulerLoading.catch(()=>{});
-    if(scheduler)await scheduler.close();
-    if(modelsLoading)await modelsLoading.catch(()=>{});
     for(const s of sockets){try{core.disconnect(s);}catch{}s.destroy();}http.closeAllConnections();
     await Promise.all([new Promise<void>(ok=>http.close(()=>ok())),new Promise<void>(ok=>ipc.close(()=>ok()))]);
     await core.drain();
