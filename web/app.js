@@ -492,13 +492,62 @@ function editDiff(name, args) {
   return lines;
 }
 
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fallback below */ }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function markdown(text) {
   const fragment = document.createDocumentFragment();
   for (const block of parseMarkdown(text)) fragment.append(markdownBlock(block));
   return fragment;
 }
 function markdownBlock(block) {
-  if (block.type === 'code') { const pre = el('pre'); pre.append(el('code', '', block.text)); return pre; }
+  if (block.type === 'code') {
+    const wrap = el('div', 'code-block');
+    const head = el('div', 'code-header');
+    const lang = el('span', 'code-lang', block.lang || 'code');
+    const copy = el('button', 'code-copy-btn');
+    copy.type = 'button';
+    copy.setAttribute('aria-label', 'Copy code');
+    copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span>';
+
+    copy.addEventListener('click', async () => {
+      const ok = await copyToClipboard(block.text);
+      if (ok) {
+        copy.classList.add('copied');
+        copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span>Copied!</span>';
+        setTimeout(() => {
+          copy.classList.remove('copied');
+          copy.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span>';
+        }, 2000);
+      }
+    });
+
+    head.append(lang, copy);
+    const pre = el('pre');
+    pre.append(el('code', '', block.text));
+    wrap.append(head, pre);
+    return wrap;
+  }
   if (block.type === 'heading') return inlines(el(`h${Math.min(4, block.level)}`), block.inlines);
   if (block.type === 'quote') { const quote = el('blockquote'); for (const b of block.blocks) quote.append(markdownBlock(b)); return quote; }
   if (block.type === 'list') { const list = el(block.ordered ? 'ol' : 'ul'); for (const item of block.items) list.append(inlines(el('li'), item.inlines)); return list; }

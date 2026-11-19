@@ -62,8 +62,8 @@ code { font-family: var(--mono); font-size: .9em; }
 /* Pairing */
 .pair-screen { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
 .pair-card { width: min(420px, 100%); text-align: center; }
-.logo { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 18px; display: grid; place-items: center; font: 600 34px/1 var(--mono); background: var(--accent); color: #fff; }
-.logo.small { width: 30px; height: 30px; margin: 0; font-size: 17px; border-radius: 8px; }
+.logo { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 14px; display: block; object-fit: contain; }
+.logo.small { width: 28px; height: 28px; margin: 0; border-radius: 6px; flex: none; display: block; object-fit: contain; }
 .pair-card h1 { margin: 0 0 8px; font-size: 24px; }
 .pair-card p { color: var(--dim); margin: 0 0 22px; }
 .pair-busy { margin: 0 0 18px; color: var(--dim); }
@@ -134,7 +134,14 @@ code { font-family: var(--mono); font-size: .9em; }
 .md ul, .md ol { margin: 0 0 .7em; padding-left: 1.3em; }
 .md li { margin: .15em 0; }
 .md blockquote { margin: 0 0 .7em; padding-left: 12px; border-left: 3px solid var(--border); color: var(--dim); }
-.md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; overflow-x: auto; font: 13px/1.5 var(--mono); margin: 0 0 .7em; }
+.md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; overflow-x: auto; font: 13px/1.5 var(--mono); margin: 0 0 .7em; user-select: text; -webkit-user-select: text; }
+.code-block { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; margin: 0 0 .8em; overflow: hidden; }
+.code-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); font: 12px/1 var(--mono); }
+.code-lang { color: var(--dim); text-transform: lowercase; font-weight: 500; }
+.code-copy-btn { display: inline-flex; align-items: center; gap: 5px; border: 0; background: none; color: var(--dim); font: 12px/1 var(--sans); font-weight: 500; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all .15s ease; }
+.code-copy-btn:hover { background: var(--surface); color: var(--text); }
+.code-copy-btn.copied { color: var(--ok); font-weight: 600; }
+.code-block pre { background: none !important; border: 0 !important; border-radius: 0 !important; margin: 0 !important; padding: 10px 12px !important; overflow-x: auto; font: 13px/1.5 var(--mono); user-select: text; -webkit-user-select: text; }
 .md :not(pre) > code { background: var(--surface-2); border-radius: 5px; padding: .08em .35em; color: var(--accent); }
 .md a { color: var(--accent); }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
