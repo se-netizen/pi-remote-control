@@ -463,22 +463,36 @@ function build(item) {
 
 function buildTool(item) {
   const open = state.open.has(item.key);
+  const toggle = () => {
+    if (state.open.has(item.key)) state.open.delete(item.key);
+    else state.open.add(item.key);
+    scheduleRender();
+  };
   const node = el('div', `tool${item.running ? ' running' : ''}${item.error ? ' error' : ''}${open ? ' open' : ''}`);
   const { label, detail } = toolSummary(item.name, item.args);
   const head = el('button', 'tool-head');
   head.type = 'button';
   head.setAttribute('aria-expanded', String(open));
   head.append(el('b', '', label), el('span', 'args', detail ? `(${detail})` : ''));
-  head.addEventListener('click', () => { if (state.open.has(item.key)) state.open.delete(item.key); else state.open.add(item.key); scheduleRender(); });
+  head.addEventListener('click', toggle);
   node.append(el('span', 'bullet'), head);
   const out = el('div', 'tool-out');
   const diff = editDiff(item.name, item.args);
   if (diff.length) for (const line of diff.slice(0, open ? 400 : 6)) out.append(el('span', line.kind, `${line.text}\n`));
   else if (item.running && !item.output) out.textContent = 'Running…';
   else out.textContent = (item.output || '(no output)').slice(0, open ? 20000 : 600);
+  if (!open) out.addEventListener('click', toggle);
   node.append(out);
   const lines = diff.length || (item.output || '').split('\n').length;
-  if (!open && lines > 3) node.append(el('div', 'more', `… +${lines - 3} lines · tap to expand`));
+  if (!open && lines > 3) {
+    const more = el('div', 'more', `… +${lines - 3} lines · tap to expand`);
+    more.addEventListener('click', toggle);
+    node.append(more);
+  } else if (open && lines > 3) {
+    const less = el('div', 'more', `Collapse output ↑`);
+    less.addEventListener('click', toggle);
+    node.append(less);
+  }
   return node;
 }
 

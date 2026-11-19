@@ -116,7 +116,9 @@ code { font-family: var(--mono); font-size: .9em; }
 .tool-out .del { color: var(--err); }
 .tool-out .add { color: var(--ok); }
 .tool.error .tool-out { color: var(--err); }
-.more { color: var(--faint); font-size: 12px; padding-left: 20px; }
+.more { color: var(--faint); font-size: 12px; padding-left: 20px; cursor: pointer; user-select: none; -webkit-user-select: none; transition: color .15s ease; }
+.more:hover { color: var(--accent); }
+.tool:not(.open) .tool-out { cursor: pointer; }
 .thinking { position: relative; padding-left: 22px; color: var(--dim); font-size: 14px; }
 .thinking summary { cursor: pointer; list-style: none; font: italic 13px/1.6 var(--mono); }
 .thinking summary::-webkit-details-marker { display: none; }
