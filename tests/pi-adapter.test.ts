@@ -10,6 +10,10 @@ import { fileURLToPath } from 'node:url';
 import { AttachBridge, installRemoteControl, remoteControlCompletions, type AttachContext, type AttachPi, type CompletionItem } from '../src/pi/attach-bridge.js';
 import { JsonLines, type BridgeCommand } from '../src/pi/types.js';
 
+delete process.env.PI_REMOTE_AUTOSTART;
+delete process.env.PI_REMOTE_BACKGROUND;
+delete process.env.PI_REMOTE_BACKGROUND_BACKEND;
+
 test('JSONL framing is LF-only and rejects oversize or non-object frames', () => {
   const records: unknown[] = [];
   const lines = new JsonLines(record => records.push(record), 80);
