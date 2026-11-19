@@ -251,7 +251,7 @@ function renderSessionList() {
     if (session.preview) text.append(el('small', 'preview', session.preview));
     text.append(el('small', '', [basename(session.cwd), session.model?.id, session.background ? 'background' : '', session.connection === 'offline' ? (session.moving ? 'moving' : 'ended') : ''].filter(Boolean).join(' · ')));
     button.append(dot, text);
-    button.addEventListener('click', () => { closeDrawer(); state.pinnedEnded = session.connection === 'offline'; if (session.sessionId !== state.sessionId) selectSession(session.sessionId); });
+    button.addEventListener('click', () => { if (!isWide()) closeDrawer(); state.pinnedEnded = session.connection === 'offline'; if (session.sessionId !== state.sessionId) selectSession(session.sessionId); });
     list.append(button);
   }
 }
@@ -843,12 +843,48 @@ function renderPicker() {
 }
 
 /* ---------- drawer & panels ---------- */
-function openDrawer() { $('drawer').hidden = false; $('scrim').hidden = false; void refreshSessions(false).catch(() => {}); }
-function closeDrawer() { $('drawer').hidden = true; $('scrim').hidden = true; }
+const isWide = () => window.matchMedia('(min-width: 768px)').matches;
+
+function updateSidebar(open, save = true) {
+  state.sidebarOpen = open;
+  if (save) {
+    try { localStorage.setItem('pi-sidebar', open ? 'open' : 'closed'); } catch { /* ignore */ }
+  }
+  const app = $('chat-screen');
+  if (app) {
+    app.classList.toggle('sidebar-collapsed', !open);
+    app.setAttribute('data-sidebar', open ? 'open' : 'closed');
+  }
+  const drawer = $('drawer');
+  if (drawer) {
+    if (isWide()) {
+      drawer.hidden = false;
+      drawer.classList.remove('open');
+      $('scrim').hidden = true;
+    } else {
+      drawer.hidden = !open;
+      drawer.classList.toggle('open', open);
+      $('scrim').hidden = !open;
+    }
+  }
+}
+
+function openDrawer() {
+  updateSidebar(true, true);
+  void refreshSessions(false).catch(() => {});
+}
+
+function closeDrawer() {
+  updateSidebar(false, true);
+}
+
+function toggleSidebar() {
+  updateSidebar(!state.sidebarOpen, true);
+}
 
 const PANELS = { background: 'Background sessions', devices: 'Devices' };
 function openPanel(name) {
-  closeDrawer();
+  if (!isWide()) closeDrawer();
   $('panel').hidden = false; $('panel-title').textContent = PANELS[name];
   for (const key of Object.keys(PANELS)) $(`panel-${key}`).hidden = key !== name;
   const load = { background: loadBackground, devices: loadDevices }[name];
@@ -909,8 +945,53 @@ async function loadBackground() {
   }
 }
 
+function applyTheme(choice) {
+  const theme = choice === 'dark' || choice === 'light' ? choice : 'system';
+  try { localStorage.setItem('pi-theme', theme); } catch { /* ignore */ }
+  document.documentElement.setAttribute('data-theme', theme);
+  const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.content = isDark ? '#1a1915' : '#faf9f5';
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    const val = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+    const active = val === theme;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-checked', String(active));
+  });
+}
+
 /* ---------- wiring ---------- */
 function initialize() {
+  const savedTheme = (() => { try { return localStorage.getItem('pi-theme') || 'system'; } catch { return 'system'; } })();
+  applyTheme(savedTheme);
+  const themeSwitch = $('theme-switch');
+  if (themeSwitch) {
+    const onThemeAction = event => {
+      const btn = event.target.closest('.theme-btn');
+      if (!btn) return;
+      const choice = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+      if (choice) applyTheme(choice);
+    };
+    themeSwitch.addEventListener('click', onThemeAction);
+  }
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const choice = btn.getAttribute('data-theme-choice') || btn.dataset.themeChoice;
+      if (choice) applyTheme(choice);
+    });
+  });
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      try {
+        if ((localStorage.getItem('pi-theme') || 'system') === 'system') applyTheme('system');
+      } catch { /* ignore */ }
+    });
+  }
+  const savedSidebar = (() => {
+    try { return localStorage.getItem('pi-sidebar'); } catch { return null; }
+  })();
+  const initialSidebar = savedSidebar !== null ? savedSidebar === 'open' : true;
+  updateSidebar(initialSidebar, false);
   $('pair-form').addEventListener('submit', submitPairLink);
   $('composer').addEventListener('submit', event => { event.preventDefault(); void send(); });
   $('input').addEventListener('input', () => { autosize(); saveDraft(); updateSend(); updateSlash(); });
@@ -934,7 +1015,8 @@ function initialize() {
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     if (!$('picker').hidden) { closePicker(); return; }
-    if (!$('stop').hidden && $('panel').hidden && $('drawer').hidden && !state.slash.open) void stop();
+    if (!isWide() && state.sidebarOpen) { closeDrawer(); return; }
+    if (!$('stop').hidden && $('panel').hidden && !state.slash.open) void stop();
   });
   $('stop').addEventListener('click', () => void stop());
   $('attach').addEventListener('click', () => $('file-input').click());
@@ -954,9 +1036,12 @@ function initialize() {
     $('jump').hidden = state.stick;
   }, { passive: true });
   $('jump').addEventListener('click', () => { state.stick = true; $('transcript').scrollTop = $('transcript').scrollHeight; $('jump').hidden = true; });
-  $('menu-button').addEventListener('click', openDrawer);
-  $('drawer-close').addEventListener('click', closeDrawer);
+  $('menu-button').addEventListener('click', toggleSidebar);
+  $('drawer-close').addEventListener('click', toggleSidebar);
   $('scrim').addEventListener('click', closeDrawer);
+  window.addEventListener('resize', () => {
+    updateSidebar(state.sidebarOpen, false);
+  });
   document.querySelectorAll('[data-panel]').forEach(button => button.addEventListener('click', () => openPanel(button.dataset.panel)));
   $('panel-back').addEventListener('click', () => { $('panel').hidden = true; });
   $('logout').addEventListener('click', async () => {
