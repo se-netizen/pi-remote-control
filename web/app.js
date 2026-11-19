@@ -115,6 +115,7 @@ function showPair(message, tailscaleUrl) {
   $('chat-screen').hidden = true; $('panel').hidden = true; closeDrawer();
   $('pair-screen').hidden = false; $('pair-busy').hidden = true; $('pair-form').hidden = false;
   if (message) $('pair-message').textContent = message;
+  document.title = 'pi-pair';
   // Opened over Wi-Fi/LAN: the same host over Tailscale signs this phone in without a QR.
   const link = $('pair-tailscale');
   link.hidden = !tailscaleUrl;
@@ -569,9 +570,18 @@ function inlines(parent, parts) {
 function isRunning() { return ['running', 'stopping', 'waiting_local_input'].includes(state.session?.workState); }
 function isLive() { return state.online && !!state.session && state.session.connection !== 'offline' && state.session.workState !== 'ended'; }
 
+function formatTitle(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return 'pi-remote';
+  return clean.toLowerCase().startsWith('pi-') ? clean : `pi-${clean}`;
+}
+
 function updateChrome() {
   const session = state.session;
-  $('title').textContent = session ? (session.title || basename(session.cwd) || 'Pi session') : 'Pi';
+  const rawTitle = session ? (session.title || basename(session.cwd) || 'session') : 'remote';
+  const displayTitle = formatTitle(rawTitle);
+  $('title').textContent = displayTitle;
+  if ($('panel').hidden) document.title = displayTitle;
   const usage = session?.usage && typeof session.usage.percent === 'number' ? `${Math.round(session.usage.percent)}% context` : '';
   $('subtitle').textContent = session ? [session.background ? `background (${session.background.backend})` : '', basename(session.cwd), session.model?.id, session.thinkingLevel && session.thinkingLevel !== 'off' ? session.thinkingLevel : '', usage].filter(Boolean).join(' · ') : '';
   const status = $('status');
@@ -931,10 +941,13 @@ function toggleSidebar() {
   updateSidebar(!state.sidebarOpen, true);
 }
 
-const PANELS = { background: 'Background sessions', devices: 'Devices' };
+const PANELS = { background: 'pi-background', devices: 'pi-devices' };
 function openPanel(name) {
   if (!isWide()) closeDrawer();
-  $('panel').hidden = false; $('panel-title').textContent = PANELS[name];
+  const panelTitle = PANELS[name] || `pi-${name}`;
+  $('panel').hidden = false;
+  $('panel-title').textContent = panelTitle;
+  document.title = panelTitle;
   for (const key of Object.keys(PANELS)) $(`panel-${key}`).hidden = key !== name;
   const load = { background: loadBackground, devices: loadDevices }[name];
   void load().catch(error => toast(error.message, 'error'));
@@ -1064,8 +1077,9 @@ function initialize() {
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     if (!$('picker').hidden) { closePicker(); return; }
+    if (!$('panel').hidden) { $('panel').hidden = true; updateChrome(); return; }
     if (!isWide() && state.sidebarOpen) { closeDrawer(); return; }
-    if (!$('stop').hidden && $('panel').hidden && !state.slash.open) void stop();
+    if (!$('stop').hidden && !state.slash.open) void stop();
   });
   $('stop').addEventListener('click', () => void stop());
   $('attach').addEventListener('click', () => $('file-input').click());
@@ -1092,7 +1106,7 @@ function initialize() {
     updateSidebar(state.sidebarOpen, false);
   });
   document.querySelectorAll('[data-panel]').forEach(button => button.addEventListener('click', () => openPanel(button.dataset.panel)));
-  $('panel-back').addEventListener('click', () => { $('panel').hidden = true; });
+  $('panel-back').addEventListener('click', () => { $('panel').hidden = true; updateChrome(); });
   $('logout').addEventListener('click', async () => {
     try { await api('/api/logout', { method: 'POST', body: {} }); } catch { /* already signed out */ }
     setSealCreds(null);
